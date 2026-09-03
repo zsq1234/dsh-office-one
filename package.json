@@ -1,0 +1,128 @@
+{
+  "name": "dsh-office-one",
+  "version": "0.1.0",
+  "description": "Single-install DSH Office bundle containing Univer create, file conversion, and workspace file viewer modules",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "server",
+    "cordis.patch.yml",
+    "README.md",
+    "USE.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "external": [
+        "react",
+        "react-dom"
+      ]
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "bundle": "tsdown --config tsdown.config.ts",
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs",
+    "build": "pnpm typecheck && pnpm bundle && pnpm check",
+    "watch": "tsdown --config tsdown.config.ts --watch",
+    "clean": "rm -rf lib",
+    "prepack": "pnpm build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-connection": "*",
+    "@deepseek-ai/dsh-client-runtime": "*",
+    "@deepseek-ai/dsh-client-ui-conversation": "*",
+    "@deepseek-ai/dsh-client-ui-primitives": "*",
+    "@deepseek-ai/dsh-client-ui-slots": "*",
+    "@deepseek-ai/dsh-storage-domain": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-workspace": "*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "dependencies": {
+    "@univerjs-pro/engine-formula": "1.0.0-beta.2",
+    "@univerjs-pro/exchange-node": "1.0.0-beta.2",
+    "@univerjs-pro/license": "1.0.0-beta.2",
+    "@univerjs-pro/shape-editor-ui": "1.0.0-beta.2",
+    "@univerjs-pro/slides": "1.0.0-beta.2",
+    "@univerjs-pro/slides-ui": "1.0.0-beta.2",
+    "@univerjs/core": "1.0.0-beta.2",
+    "@univerjs/design": "1.0.0-beta.2",
+    "@univerjs/docs": "1.0.0-beta.2",
+    "@univerjs/docs-ui": "1.0.0-beta.2",
+    "@univerjs/drawing": "1.0.0-beta.2",
+    "@univerjs/drawing-ui": "1.0.0-beta.2",
+    "@univerjs/engine-formula": "1.0.0-beta.2",
+    "@univerjs/engine-render": "1.0.0-beta.2",
+    "@univerjs/find-replace": "1.0.0-beta.2",
+    "@univerjs/preset-docs-core": "1.0.0-beta.2",
+    "@univerjs/preset-docs-drawing": "1.0.0-beta.2",
+    "@univerjs/preset-sheets-core": "1.0.0-beta.2",
+    "@univerjs/presets": "1.0.0-beta.2",
+    "@univerjs/sheets": "1.0.0-beta.2",
+    "@univerjs/sheets-conditional-formatting-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-crosshair-highlight": "1.0.0-beta.2",
+    "@univerjs/sheets-data-validation": "1.0.0-beta.2",
+    "@univerjs/sheets-data-validation-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-drawing": "1.0.0-beta.2",
+    "@univerjs/sheets-drawing-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-filter-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-find-replace": "1.0.0-beta.2",
+    "@univerjs/sheets-formula-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-hyper-link-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-note-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-numfmt-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-sort-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-table-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-thread-comment-ui": "1.0.0-beta.2",
+    "@univerjs/sheets-ui": "1.0.0-beta.2",
+    "@univerjs/thread-comment-ui": "1.0.0-beta.2",
+    "@univerjs/ui": "1.0.0-beta.2",
+    "@univerjs/watermark": "1.0.0-beta.2",
+    "prismjs": "1.30.0",
+    "rxjs": "7.8.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-connection": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-workspace": "0.1.0-rc.6",
+    "@types/node": "^22.0.0",
+    "@types/prismjs": "^1.26.5",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "lightningcss": "^1.30.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsdown": "^0.15.11",
+    "typescript": "^5.9.2"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

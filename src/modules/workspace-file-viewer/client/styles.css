@@ -1,0 +1,83 @@
+.dsh-wfv {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 360px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, #202124);
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  border: 1px solid var(--dsw-alias-border-l2, #e5e7eb);
+  border-radius: 12px;
+  font: 13px/1.5 system-ui, sans-serif;
+}
+.dsh-wfv-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-title { flex: 1; font-weight: 600; }
+.dsh-wfv-actions { display: flex; align-items: center; gap: 5px; }
+.dsh-wfv-font-size { min-width: 34px; color: var(--dsw-alias-label-secondary, #64748b); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: center; }
+.dsh-wfv-action:disabled { cursor: default; opacity: .45; }
+.dsh-wfv button { color: inherit; background: none; border: 0; cursor: pointer; font: inherit; }
+.dsh-wfv-action { padding: 4px 8px; border-radius: 6px; }
+.dsh-wfv-action:hover, .dsh-wfv-file.active { background: var(--dsw-alias-bg-module-platform, #eef2ff); }
+.dsh-wfv-save { color: #fff !important; background: #2563eb !important; }
+.dsh-wfv-save:hover { background: #1d4ed8 !important; }
+.dsh-wfv-save:disabled { background: #94a3b8 !important; }
+/* The DSH conversation shell sizes the active session view area with
+   `flex: 1 0 auto; min-height: auto` unless a composer overlay is present, so a
+   tall file tree or preview grows the whole plugin and it scrolls as ONE block
+   inside the conversation scrollport. Constrain the view area to the remaining
+   scrollport height while this plugin is the active view, so the file list and
+   the content preview become two independent scroll blocks. */
+[data-slot="conversation.session"] > div:has(> [data-slot="conversation.view"] > .dsh-wfv) {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+.dsh-wfv-body { display: flex; flex: 1; min-height: 0; }
+.dsh-wfv-tree { width: 260px; flex: 0 0 260px; overflow: auto; padding: 8px; border-right: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-file, .dsh-wfv-dir, .dsh-wfv-load-more, .dsh-wfv-tree-error { display: block; width: 100%; padding-top: 5px; padding-right: 8px; padding-bottom: 5px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; border-radius: 6px; }
+.dsh-wfv-file:hover, .dsh-wfv-load-more:hover { background: var(--dsw-alias-bg-module-platform, #eef2ff); }
+.dsh-wfv-dir { color: var(--dsw-alias-label-secondary, #6b7280); font-weight: 600; }
+.dsh-wfv-load-more, .dsh-wfv-tree-status { color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; }
+.dsh-wfv-tree-status { padding-top: 5px; padding-bottom: 5px; }
+.dsh-wfv-tree-error { color: #b91c1c !important; font-size: 12px !important; }
+.dsh-wfv-content { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; padding: 14px; }
+/* Pane children must never shrink: a shrinking code block (flex default
+   flex-shrink:1 + overflow:hidden) would clip long files instead of letting
+   the content pane scroll through them. */
+.dsh-wfv-content > * { flex-shrink: 0; }
+.dsh-wfv-content-univer { overflow: hidden; }
+.dsh-wfv-path { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; margin-bottom: 10px; font-weight: 600; }
+.dsh-wfv-save-status { overflow: hidden; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wfv-muted, .dsh-wfv-error { padding: 14px; color: var(--dsw-alias-label-secondary, #6b7280); }
+.dsh-wfv-error { color: #b91c1c; }
+.dsh-wfv-pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--dsh-wfv-code-font-size, 14px)/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dsh-wfv-code { position: relative; min-width: max-content; overflow: hidden; color: #334155; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; }
+.dsh-wfv-code-language { position: sticky; top: 0; left: 0; z-index: 1; width: max-content; margin-left: auto; padding: 3px 9px; color: #64748b; background: #f1f5f9; border-bottom-left-radius: 6px; font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .05em; text-transform: uppercase; }
+.dsh-wfv-code .dsh-wfv-pre { padding: 4px 16px 16px; color: #334155; font-size: var(--dsh-wfv-code-font-size, 14px); white-space: pre; overflow-wrap: normal; tab-size: 2; }
+.dsh-wfv-code .token.comment, .dsh-wfv-code .token.prolog, .dsh-wfv-code .token.doctype, .dsh-wfv-code .token.cdata { color: #64748b; font-style: italic; }
+.dsh-wfv-code .token.punctuation { color: #64748b; }
+.dsh-wfv-code .token.property, .dsh-wfv-code .token.tag, .dsh-wfv-code .token.boolean, .dsh-wfv-code .token.number, .dsh-wfv-code .token.constant, .dsh-wfv-code .token.symbol, .dsh-wfv-code .token.deleted { color: #be185d; }
+.dsh-wfv-code .token.selector, .dsh-wfv-code .token.attr-name, .dsh-wfv-code .token.string, .dsh-wfv-code .token.char, .dsh-wfv-code .token.builtin, .dsh-wfv-code .token.inserted { color: #15803d; }
+.dsh-wfv-code .token.operator, .dsh-wfv-code .token.entity, .dsh-wfv-code .token.url, .dsh-wfv-code .language-css .token.string, .dsh-wfv-code .style .token.string { color: #0369a1; }
+.dsh-wfv-code .token.atrule, .dsh-wfv-code .token.attr-value, .dsh-wfv-code .token.keyword { color: #7c3aed; }
+.dsh-wfv-code .token.function, .dsh-wfv-code .token.class-name { color: #b45309; }
+.dsh-wfv-code .token.regex, .dsh-wfv-code .token.important, .dsh-wfv-code .token.variable { color: #c2410c; }
+.dsh-wfv-code .token.important, .dsh-wfv-code .token.bold { font-weight: 700; }
+.dsh-wfv-code .token.italic { font-style: italic; }
+.dsh-wfv-univer { position: relative; flex: 1; min-width: 0; min-height: 320px; overflow: hidden; border: 1px solid var(--dsw-alias-border-l2, #e5e7eb); border-radius: 8px; }
+.dsh-wfv-univer-runtime { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+/* Slides presentation uses position: fixed. Establish a local containing block so
+ * playback fills this viewer instead of covering the complete DSH application. */
+.dsh-wfv-univer-slides { contain: layout paint; isolation: isolate; transform: translateZ(0); }
+.dsh-wfv-univer-slides > div { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.dsh-wfv-univer-slides > .univer-relative.univer-isolate.univer-h-full { position: absolute !important; inset: 0; height: 100% !important; }
+@media (max-width: 760px) {
+  .dsh-wfv-tree { width: 190px; flex-basis: 190px; }
+}
+/* Large files: virtualized window rendering. Only the visible slice of lines is
+   in the DOM; the spacer owns the scrollbar geometry at the true total size. */
+.dsh-wfv-vcode { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; min-width: 0 !important; overflow: hidden; }
+.dsh-wfv-vcode .dsh-wfv-code-language { position: static; }
+.dsh-wfv-vscroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 0; overflow-anchor: none; }
+.dsh-wfv-vspacer { box-sizing: border-box; width: max-content; min-width: 100%; }
+.dsh-wfv-vcode .dsh-wfv-pre { margin: 0; padding: 0 16px; white-space: pre; overflow-wrap: normal; tab-size: 2; }

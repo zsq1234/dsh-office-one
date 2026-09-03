@@ -1,0 +1,5 @@
+# One profile layer and one Loader entry; the entry mounts all three internal modules.
+- insert:
+    - id: dsh-office-one
+      name: dsh-office-one
+      config: {}
