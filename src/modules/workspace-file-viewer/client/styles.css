@@ -81,3 +81,45 @@
 .dsh-wfv-vscroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 0; overflow-anchor: none; }
 .dsh-wfv-vspacer { box-sizing: border-box; width: max-content; min-width: 100%; }
 .dsh-wfv-vcode .dsh-wfv-pre { margin: 0; padding: 0 16px; white-space: pre; overflow-wrap: normal; tab-size: 2; }
+
+/* Scoped Markdown typography; inherit the GUI theme rather than global resets. */
+.dsh-wfv-markdown.dsh-wfv-code { min-width: 0; width: 100%; box-sizing: border-box; padding: 24px 32px; color: inherit; background: var(--dsw-alias-bg-layer-1, #fff); border-color: var(--dsw-alias-border-l2, #e5e7eb); line-height: 1.75; overflow-wrap: anywhere; }
+.dsh-wfv-markdown > :first-child { margin-top: 0; }
+.dsh-wfv-markdown > :last-child { margin-bottom: 0; }
+.dsh-wfv-markdown :is(h1,h2,h3,h4,h5,h6) { margin: 1.4em 0 .6em; font-weight: 650; line-height: 1.3; }
+.dsh-wfv-markdown h1 { font-size: 2em; }
+.dsh-wfv-markdown h2 { font-size: 1.5em; }
+.dsh-wfv-markdown h3 { font-size: 1.25em; }
+.dsh-wfv-markdown :is(h1,h2) { padding-bottom: .3em; border-bottom: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-markdown :is(p,ul,ol,blockquote,pre,table) { margin: 0 0 1em; }
+.dsh-wfv-markdown :is(ul,ol) { padding-left: 2em; }
+.dsh-wfv-markdown ul { list-style: disc; }
+.dsh-wfv-markdown ol { list-style: decimal; }
+.dsh-wfv-markdown li > :is(ul,ol) { margin-bottom: 0; }
+.dsh-wfv-markdown a { color: #2563eb; text-decoration: underline; text-underline-offset: 3px; }
+.dsh-wfv-markdown blockquote { margin-left: 0; padding: 0 1em; color: var(--dsw-alias-label-secondary, #64748b); border-left: 4px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-markdown code { padding: .15em .35em; border-radius: 4px; background: var(--dsw-alias-bg-module-platform, #f1f5f9); font: .9em/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dsh-wfv-markdown pre { overflow: auto; padding: 16px; border-radius: 8px; color: #334155; background: #f8fafc; white-space: pre; overflow-wrap: normal; tab-size: 2; }
+.dsh-wfv-markdown pre code { padding: 0; background: none; }
+.dsh-wfv-markdown-table { max-width: 100%; overflow: auto; margin-bottom: 1em; }
+.dsh-wfv-markdown table { border-collapse: collapse; margin-bottom: 0; }
+.dsh-wfv-markdown :is(th,td) { padding: 6px 13px; border: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-markdown th { font-weight: 600; background: var(--dsw-alias-bg-module-platform, #f1f5f9); }
+.dsh-wfv-markdown img { max-width: 100%; height: auto; }
+.dsh-wfv-markdown .task-list-item { list-style: none; }
+.dsh-wfv-markdown input[type=checkbox] { margin-right: .5em; }
+.dsh-wfv-markdown hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-markdown-image { color: var(--dsw-alias-label-secondary, #64748b); }
+.dsh-wfv-head { flex-wrap: wrap; }
+.dsh-wfv-actions { flex-wrap: wrap; }
+@media (max-width: 760px) { .dsh-wfv-markdown.dsh-wfv-code { padding: 16px; } }
+
+/* Office bodies now live in DSH's built-in right-sidebar document preview. */
+.dsh-wfv-office { display: flex; flex: 1; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; color: var(--dsw-alias-label-primary, #202124); background: var(--dsw-alias-bg-layer-1, #fff); }
+.dsh-wfv-office-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; min-height: 34px; padding: 4px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2, #e5e7eb); }
+.dsh-wfv-office-status { flex: 1; overflow: hidden; color: var(--dsw-alias-label-secondary, #64748b); font: 12px/1.4 system-ui, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wfv-office-save { flex: 0 0 auto; padding: 4px 10px; color: #fff; background: #2563eb; border: 0; border-radius: 6px; cursor: pointer; font: 12px/1.5 system-ui, sans-serif; }
+.dsh-wfv-office-save:hover { background: #1d4ed8; }
+.dsh-wfv-office-save:disabled { cursor: default; background: #94a3b8; opacity: .65; }
+.dsh-wfv-office-editor { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding: 8px; }
+.dsh-wfv-office-editor .dsh-wfv-univer { min-height: 0; border-radius: 6px; }

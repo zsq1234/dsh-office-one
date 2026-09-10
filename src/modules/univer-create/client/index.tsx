@@ -643,20 +643,50 @@ function conversationLabel(node: ConversationNode): { role: string; text: string
   return null
 }
 
+type SnapshotHook = <Selected>(selector: (value: any) => Selected) => Selected
+type ConversationFeedSource = {
+  nodes?: readonly ConversationNode[]
+  partial?: { blocks?: readonly unknown[] } | null
+  views?: { get: (target: string) => unknown }
+}
+type ChatSnapshotSource = {
+  legacy?: {
+    nodes?: readonly ConversationNode[]
+    partial?: { blocks?: readonly unknown[] } | null
+  }
+}
+
+const EMPTY_CONVERSATION_NODES: readonly ConversationNode[] = []
+
+/**
+ * Read Chat's live conversation projection on current DSH releases. Before the
+ * target-neutral Conversation split, the same fields lived on useSession, so
+ * keep that source as a compatibility fallback for older hosts.
+ */
+function useConversationFeed(props: ConvViewProps): { nodes: readonly ConversationNode[]; partialText: string } {
+  const useConversation = (props as ConvViewProps & { useConversation?: SnapshotHook }).useConversation
+  const useSource = useConversation ?? props.useSession as unknown as SnapshotHook
+  const source = useSource((value) => value) as ConversationFeedSource | null | undefined
+  const chat = source?.views?.get('chat') as ChatSnapshotSource | undefined
+  const legacy = chat?.legacy ?? source
+  const nodes = legacy?.nodes ?? EMPTY_CONVERSATION_NODES
+  const partialText = legacy?.partial?.blocks == null ? '' : textFromBlocks(legacy.partial.blocks)
+  return { nodes, partialText }
+}
+
 const clientConnection: { current: ConnectionHandle | null } = { current: null }
 // Remember which sessions opened a workbook during this browser lifetime. This
 // distinguishes a first visit (welcome screen) from remounting after a tab switch.
 const openedWorkbookSessions = new Set<string>()
 
-function SheetProductView({ sessionId, useSession }: ConvViewProps) {
-  const snapshot = useSession((value) => value)
-  const nodes = snapshot.nodes
+function SheetProductView(props: ConvViewProps) {
+  const { sessionId } = props
+  const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => nodes.map(operationFromNode).filter((item): item is SheetOperation => item !== null), [nodes])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
     .slice(-4), [nodes])
-  const partialText = snapshot.partial === null ? '' : textFromBlocks(snapshot.partial.blocks)
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(null)
@@ -670,7 +700,11 @@ function SheetProductView({ sessionId, useSession }: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [sheetVisible, setSheetVisible] = useState(() => openedWorkbookSessions.has(sessionId))
-  const [hostLoaded, setHostLoaded] = useState(() => !openedWorkbookSessions.has(sessionId))
+  // Always let the session initialization effect choose first-visit vs restore
+  // before Univer is allowed to mount. Starting as loaded lets the layout effect
+  // add the session marker first, so the passive effect misclassifies the same
+  // first mount as a restore and races its initial save.
+  const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
@@ -1086,15 +1120,14 @@ function SheetProductView({ sessionId, useSession }: ConvViewProps) {
 
 const openedDocumentSessions = new Set<string>()
 
-function DocProductView({ sessionId, useSession }: ConvViewProps) {
-  const snapshot = useSession((value) => value)
-  const nodes = snapshot.nodes
+function DocProductView(props: ConvViewProps) {
+  const { sessionId } = props
+  const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => nodes.map(docOperationFromNode).filter((item): item is DocOperation => item !== null), [nodes])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
     .slice(-4), [nodes])
-  const partialText = snapshot.partial === null ? '' : textFromBlocks(snapshot.partial.blocks)
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(null)
@@ -1108,7 +1141,7 @@ function DocProductView({ sessionId, useSession }: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [documentVisible, setDocumentVisible] = useState(() => openedDocumentSessions.has(sessionId))
-  const [hostLoaded, setHostLoaded] = useState(() => !openedDocumentSessions.has(sessionId))
+  const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
@@ -1474,15 +1507,14 @@ function DocProductView({ sessionId, useSession }: ConvViewProps) {
 
 const openedPresentationSessions = new Set<string>()
 
-function SlideProductView({ sessionId, useSession }: ConvViewProps) {
-  const snapshot = useSession((value) => value)
-  const nodes = snapshot.nodes
+function SlideProductView(props: ConvViewProps) {
+  const { sessionId } = props
+  const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => nodes.map(slideOperationFromNode).filter((item): item is SlideOperation => item !== null), [nodes])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
     .slice(-4), [nodes])
-  const partialText = snapshot.partial === null ? '' : textFromBlocks(snapshot.partial.blocks)
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedSlideRuntime | null>(null)
@@ -1496,7 +1528,7 @@ function SlideProductView({ sessionId, useSession }: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [presentationVisible, setPresentationVisible] = useState(() => openedPresentationSessions.has(sessionId))
-  const [hostLoaded, setHostLoaded] = useState(() => !openedPresentationSessions.has(sessionId))
+  const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<ISlideData | null>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
@@ -1926,17 +1958,17 @@ function SlideProductView({ sessionId, useSession }: ConvViewProps) {
 const selectedUnitBySession = new Map<string, UniverUnitType>()
 
 function UniverView(props: ConvViewProps) {
-  const conversation = props.useSession((value) => value)
+  const { nodes } = useConversationFeed(props)
   const suggestedUnit = useMemo<UniverUnitType>(() => {
-    for (let index = conversation.nodes.length - 1; index >= 0; index -= 1) {
-      const node = conversation.nodes[index]!
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      const node = nodes[index]!
       if (node.kind !== 'tool-result' || node.call === null) continue
       if (SLIDE_TOOL_NAMES.has(node.call.name)) return 'slide'
       if (DOC_TOOL_NAMES.has(node.call.name)) return 'doc'
       if (SHEET_TOOL_NAMES.has(node.call.name)) return 'sheet'
     }
     return 'sheet'
-  }, [conversation.nodes])
+  }, [nodes])
   const [unitType, setUnitType] = useState<UniverUnitType>(() => selectedUnitBySession.get(props.sessionId) ?? suggestedUnit)
 
   useEffect(() => {

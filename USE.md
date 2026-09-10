@@ -14,12 +14,12 @@
    - 支持表格、文档和演示文稿的导入、编辑与导出。
    - 转换服务随插件自动启动，默认监听 `127.0.0.1:8787`。
 
-3. **Workspace 文件查看与 Office 编辑**
-   - 在 DSH 会话页面中浏览当前 session workspace 文件树。
-   - 预览代码和文本文件。
+3. **Workspace Office 文件编辑**
+   - 复用 DSH 自带的 Workspace 文件列表和文档预览。
    - 使用 Univer 打开和编辑 workspace 中的 Excel、Word、PowerPoint 文件。
+   - 不再额外注册独立的「Workspace 文件」对话 Tab。
 
-插件包含一个 Host 插件、一个 Web Client 插件和一个 Bundle 配置层，在一个入口内组合对话编辑、文件转换与 workspace 文件查看能力。
+插件包含一个 Host 插件、一个 Web Client 插件和一个 Bundle 配置层，在一个入口内组合对话编辑、文件转换与 Workspace Office 文件预览能力。
 
 ## 适用场景
 
@@ -27,14 +27,14 @@
 - 在对话过程中手动调整 AI 生成的 Office 内容。
 - 打开并修改项目 workspace 中已有的 Office 文件。
 - 将对话中生成的内容保存为 `.xlsx`、`.docx` 或 `.pptx`。
-- 在 DSH 页面内查看 workspace 的代码和文本文件。
+- 通过 DSH 自带的文件预览查看 workspace 的代码、文本和 Office 文件。
 
 ## 使用入口
 
-打开 DSH Web 页面并进入一个绑定了 workspace 的会话。会话视图中提供两个入口：
+打开 DSH Web 页面并进入一个绑定了 workspace 的会话：
 
-- **Univer**：创建和编辑 Sheet、Doc、Slide。
-- **Workspace 文件**：浏览和编辑当前 session workspace 文件。
+- 在会话的 **Univer** 视图中创建和编辑 Sheet、Doc、Slide。
+- 在 DSH 自带的右侧 **Workspace 文件列表** 中浏览文件；点击 Office 文件后，会在内置文档预览中打开 `Office (Univer)` 渲染器。
 
 ## 使用 Univer 编辑器
 
@@ -151,30 +151,9 @@ Slide 工具支持的主要能力包括：
 
 更新或删除元素前，应先让 AI 列出当前幻灯片，取得正确的元素 ID。
 
-## 使用 Workspace 文件视图
+## 使用 Workspace 文件列表
 
-进入会话中的 **Workspace 文件** 视图后，左侧显示当前 session workspace 文件树，右侧显示选中文件的内容。
-
-### 浏览文件
-
-- 点击目录可展开或折叠。
-- 每次默认加载 100 个目录项，可点击“继续加载”。
-- 点击右上角的“刷新”可重新读取文件树。
-- `.git`、`node_modules` 和 `.DS_Store` 默认不显示。
-- 所有文件访问都限制在当前 session workspace 内，符号链接也不能绕过该限制。
-
-### 查看代码和文本
-
-点击普通代码或文本文件后，可以：
-
-- 查看带语法高亮的内容。
-- 复制全部文本。
-- 使用 `A−` 和 `A+` 调整代码字号。
-- 对大文件使用虚拟化渲染。
-
-### 打开和编辑 Office 文件
-
-Workspace 文件视图支持以下格式：
+在 DSH 自带的右侧 **Workspace 文件列表** 中展开目录并点击文件。普通代码、Markdown、图片、PDF 等格式继续使用 DSH 内置预览；本插件只为以下 Office 后缀注册优先级更高的 `Office (Univer)` 渲染器：
 
 | 类型 | 可打开 | 可保存 |
 | --- | --- | --- |
@@ -182,14 +161,14 @@ Workspace 文件视图支持以下格式：
 | Doc | `.doc`、`.docx` | `.docx` |
 | Slide | `.ppt`、`.pptx` | `.pptx` |
 
-打开 Office 文件后，可以直接在右侧 Univer 编辑器中修改。点击 **保存** 后：
+打开 Office 文件后，可以直接在右侧文档预览中的 Univer 编辑器里修改。点击 **保存** 后：
 
 - `.xlsx`、`.csv`、`.docx`、`.pptx` 原位保存。
 - `.xls` 不覆盖原文件，而是在同目录生成同名 `.xlsx`。
 - 旧版 `.doc` 和 `.ppt` 可以打开，但不能按旧格式原位保存。
 - 如果文件在打开后被其他程序修改，插件会拒绝覆盖；刷新并重新打开文件后再保存。
 
-单个读取、转换或保存请求的大小上限为 300 MiB。
+DSH 内置预览必须先完整读取二进制文件，其大小上限由 DSH Host 的 `workspaceFiles.maxFileBytes` 控制（当前默认 32 MiB）；插件自身的转换和保存接口上限为 300 MiB。
 
 ## 数据保存说明
 
@@ -273,7 +252,7 @@ reports/weekly.docx
 
 ### 保存时报文件已经改变
 
-Workspace 文件视图会记录文件打开时的修改时间。如果文件随后被其他程序修改，插件会阻止覆盖。点击刷新，重新打开文件，确认内容后再保存。
+Office 预览会记录文件打开时的修改时间。如果文件随后被其他程序修改，插件会阻止覆盖。使用 DSH 内置预览的重新加载操作或关闭后重新打开文件，确认内容后再保存。
 
 ### `.xls`、`.doc` 或 `.ppt` 为什么不能原格式保存
 

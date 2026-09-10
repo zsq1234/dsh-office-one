@@ -90,6 +90,21 @@ function cssPlugin() {
   }
 }
 
+// vfile uses package-private #imports with node/default conditions. Resolve
+// its shipped browser adapters explicitly: this toolchain otherwise selects
+// the Node adapters even for a browser build. Do not polyfill Node globally.
+function vfileBrowserPlugin() {
+  return {
+    name: 'dsh-office-one-vfile-browser',
+    resolveId(source: string, importer?: string) {
+      if (!/^#min(path|proc|url)$/.test(source) || !importer) return null
+      const normalized = importer.replaceAll('\\\\', '/')
+      if (!normalized.includes('/node_modules/vfile/lib/')) return null
+      return resolve(dirname(importer), `${source.slice(1)}.browser.js`)
+    },
+  }
+}
+
 const browserShared = {
   outDir: 'lib',
   format: 'cjs' as const,
@@ -103,7 +118,7 @@ const browserShared = {
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
   },
-  plugins: [dedupeRediPlugin(), cssPlugin()],
+  plugins: [vfileBrowserPlugin(), dedupeRediPlugin(), cssPlugin()],
 }
 
 export default defineConfig([

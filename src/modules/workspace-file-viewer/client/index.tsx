@@ -16,6 +16,7 @@ import 'prismjs/components/prism-sql'
 import 'prismjs/components/prism-yaml'
 import 'prismjs/components/prism-markdown'
 
+import { MarkdownPreview, isMarkdown, canPreviewMarkdown } from './markdown.js'
 import './styles.css'
 
 type Entry = {
@@ -540,6 +541,9 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
   const [loading, setLoading] = useState(true)
   const [fileLoading, setFileLoading] = useState(false)
   const [codeFontSize, setCodeFontSize] = useState(14)
+  const [markdownSource, setMarkdownSource] = useState(false)
+  const markdownFile = isMarkdown(selected)
+  const markdownAllowed = useMemo(() => content !== null && canPreviewMarkdown(content), [content])
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
@@ -650,6 +654,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
     const controller = new AbortController()
     fileRequestRef.current = controller
     setSelected(path)
+    setMarkdownSource(false)
     setContent(null)
     setWorkbook(null)
     setDocumentData(null)
@@ -792,6 +797,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
         <span className="dsh-wfv-title">Workspace 文件</span>
         <div className="dsh-wfv-actions">
           {selected && content !== null && <>
+            {markdownFile && <button className="dsh-wfv-action" disabled={!markdownAllowed} aria-pressed={!markdownSource && markdownAllowed} onClick={() => setMarkdownSource((value) => !value)} title={markdownAllowed ? '切换 Markdown 预览与源码' : '文件过大，已使用源码模式'}>{markdownSource || !markdownAllowed ? '预览' : '源码'}</button>}
             <button className="dsh-wfv-action" onClick={() => navigator.clipboard?.writeText(content)}>复制</button>
             <button className="dsh-wfv-action" onClick={() => setCodeFontSize((size) => Math.max(12, size - 1))} disabled={codeFontSize <= 12} title="缩小代码字体">A−</button>
             <span className="dsh-wfv-font-size" title="当前代码字体大小">{codeFontSize}px</span>
@@ -823,7 +829,12 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
           {!fileLoading && workbook !== null && <UniverWorkbook key={selected} snapshot={workbook} snapshotProviderRef={snapshotProviderRef} />}
           {!fileLoading && documentData !== null && <UniverDocument key={selected} snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
           {!fileLoading && slidesData !== null && <UniverSlides key={selected} snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
-          {!fileLoading && content !== null && <CodePreview path={selected} content={content} fontSize={codeFontSize} />}
+          {!fileLoading && content !== null && <>
+            {markdownFile && !markdownAllowed && <div className="dsh-wfv-muted" role="status">Markdown 文件较大，已切换为源码显示以保持流畅。</div>}
+            {markdownFile && markdownAllowed && !markdownSource
+              ? <MarkdownPreview key={selected} path={selected} content={content} fontSize={codeFontSize} onOpenFile={openFile} />
+              : <CodePreview key={selected} path={selected} content={content} fontSize={codeFontSize} />}
+          </>}
           {!fileLoading && !selected && !error && <div className="dsh-wfv-muted">选择一个文件进行预览；XLS、XLSX、CSV、DOC/DOCX 和 PPT/PPTX 将转换为 Univer UnitData。</div>}
         </main>
       </div>
@@ -831,13 +842,179 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
   )
 }
 
-export const inject = ['slots']
+type DocumentPreviewContent =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> }
+
+type OfficePreviewProps = {
+  readonly resourceAddress: string
+  readonly content: DocumentPreviewContent
+  readonly scrollportRef: React.RefCallback<HTMLElement>
+}
+
+type SessionOfficeFile = { sessionId: string; path: string }
+
+const OFFICE_PREVIEW_ID = 'dsh-office-one/office'
+const OFFICE_EXTENSIONS = ['xls', 'xlsx', 'csv', 'doc', 'docx', 'ppt', 'pptx'] as const
+
+function sessionOfficeFile(address: string): SessionOfficeFile | null {
+  const prefix = 'dsh-resource://file/session/'
+  if (!address.startsWith(prefix)) return null
+  try {
+    const suffixIndex = address.search(/[?#]/)
+    const encoded = address.slice(prefix.length, suffixIndex === -1 ? undefined : suffixIndex)
+    const [sessionId, ...path] = encoded.split('/')
+    if (!sessionId || path.length === 0) return null
+    return {
+      sessionId: decodeURIComponent(sessionId),
+      path: path.map(decodeURIComponent).join('/'),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Office renderer selected by DSH's built-in workspace file list/document preview. */
+function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePreviewProps) {
+  const file = useMemo(() => sessionOfficeFile(resourceAddress), [resourceAddress])
+  const [workbook, setWorkbook] = useState<unknown>(null)
+  const [documentData, setDocumentData] = useState<unknown>(null)
+  const [slidesData, setSlidesData] = useState<unknown>(null)
+  const [loadedModified, setLoadedModified] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('')
+  const snapshotProviderRef = useRef<(() => unknown) | null>(null)
+  const requestVersionRef = useRef(0)
+
+  useEffect(() => {
+    setWorkbook(null)
+    setDocumentData(null)
+    setSlidesData(null)
+    setLoadedModified('')
+    setError('')
+    setSaveStatus('')
+    setSaving(false)
+    snapshotProviderRef.current = null
+    const requestVersion = ++requestVersionRef.current
+    if (content.kind !== 'bytes' || file === null) return
+
+    const controller = new AbortController()
+    const isWorkbook = workbookFormat(file.path) !== null
+    const isDocument = /\.(doc|docx)$/i.test(file.path)
+    const endpoint = isWorkbook ? 'workspace-xlsx' : isDocument ? 'workspace-doc' : 'workspace-slides'
+    setLoading(true)
+    void (async () => {
+      try {
+        const response = await fetch(`/api/${endpoint}?sessionId=${encodeURIComponent(file.sessionId)}&path=${encodeURIComponent(file.path)}`, {
+          signal: controller.signal,
+        })
+        const payload = await response.json()
+        if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
+        if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
+        setLoadedModified(payload.modified || '')
+        if (isWorkbook) setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
+        else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
+        else setSlidesData(payload.presentation)
+      } catch (reason) {
+        if (!controller.signal.aborted && requestVersionRef.current === requestVersion) {
+          setError(reason instanceof Error ? reason.message : String(reason))
+        }
+      } finally {
+        if (requestVersionRef.current === requestVersion) setLoading(false)
+      }
+    })()
+    return () => controller.abort()
+  }, [content, file])
+
+  const saveOfficeFile = async () => {
+    if (file === null) return
+    const target = officeSaveTarget(file.path)
+    if (!target) {
+      setSaveStatus('当前格式不支持保存；XLS 将另存为 XLSX，DOC/PPT 请先转换为 DOCX/PPTX')
+      return
+    }
+    const getSnapshot = snapshotProviderRef.current
+    if (!getSnapshot) {
+      setSaveStatus('编辑器仍在加载，请稍后再试')
+      return
+    }
+
+    const requestVersion = ++requestVersionRef.current
+    setSaving(true)
+    setSaveStatus('')
+    try {
+      const response = await fetch(`/api/workspace-office-save?sessionId=${encodeURIComponent(file.sessionId)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          path: file.path,
+          unitType: target.unitType,
+          format: target.format,
+          expectedModified: loadedModified,
+          data: getSnapshot(),
+        }),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || '保存失败')
+      if (requestVersionRef.current === requestVersion) {
+        const savedAsNewFile = payload.path !== file.path
+        setSaveStatus(`${savedAsNewFile ? '已另存为' : '已保存'} ${payload.path}`)
+        setLoadedModified(payload.modified || '')
+      }
+    } catch (reason) {
+      if (requestVersionRef.current === requestVersion) setSaveStatus(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (requestVersionRef.current === requestVersion) setSaving(false)
+    }
+  }
+
+  if (file === null) {
+    return <div className="dsh-wfv-office-status">Office 预览仅支持当前会话 Workspace 中的文件。</div>
+  }
+  const loaded = workbook !== null || documentData !== null || slidesData !== null
+  const target = officeSaveTarget(file.path)
+  return (
+    <section ref={scrollportRef} className="dsh-wfv-office" data-office-preview={file.path}>
+      <div className="dsh-wfv-office-toolbar">
+        <span className="dsh-wfv-office-status" role="status">
+          {loading ? '正在通过 dsh-univer-file-export 转换并加载…' : error || saveStatus}
+        </span>
+        {loaded && (
+          <button
+            type="button"
+            className="dsh-wfv-office-save"
+            disabled={saving || target === null}
+            title={workbookFormat(file.path) === 'xls' ? '将保存为同目录同名 XLSX 文件' : target ? '按原格式保存到 Workspace' : '旧版 DOC/PPT 格式不支持原位保存'}
+            onClick={() => void saveOfficeFile()}
+          >
+            {saving ? '保存中…' : '保存'}
+          </button>
+        )}
+      </div>
+      <div className="dsh-wfv-office-editor">
+        {!loading && !error && workbook !== null && <UniverWorkbook snapshot={workbook} snapshotProviderRef={snapshotProviderRef} />}
+        {!loading && !error && documentData !== null && <UniverDocument snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
+        {!loading && !error && slidesData !== null && <UniverSlides snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
+      </div>
+    </section>
+  )
+}
+
+export const inject = ['slots', 'documentPreviews']
 
 export function apply(ctx: any): void {
-  ctx.slots.inject('conversation.view', () => ctx.slots.register({
-    name: 'conversation.view',
-    id: 'workspace-file-viewer',
-    order: 100,
-    label: 'Workspace 文件',
-  }, FileBrowser))
+  ctx.effect(() => ctx.documentPreviews.register({
+    id: OFFICE_PREVIEW_ID,
+    extensions: OFFICE_EXTENSIONS,
+    priority: 'extension',
+    title: () => 'Office (Univer)',
+    loading: 'bytes-complete',
+    wrap: false,
+  }), 'dsh-office-one: Office preview metadata')
+  ctx.effect(() => ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register({
+    name: 'sidebar.right.tab.document',
+    key: OFFICE_PREVIEW_ID,
+  }, OfficePreview)), 'dsh-office-one: Office preview body')
 }
