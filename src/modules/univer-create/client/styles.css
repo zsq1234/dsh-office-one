@@ -9,7 +9,9 @@
 }
 
 .dsh-univer-create-product-bar {
-  z-index: 10001;
+  /* Stay above the isolated Univer runtime, but below DSH's fullscreen sidebar
+     (`z-index: 40`) so this menu cannot bleed through a fullscreen file tab. */
+  z-index: 2;
   display: flex;
   flex: 0 0 auto;
   align-items: center;

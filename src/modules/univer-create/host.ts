@@ -1,5 +1,4 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { chmod, lstat, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
@@ -221,16 +220,53 @@ async function saveExportedFile(root: string, filePath: string, unitType: keyof 
 }
 
 export function apply(ctx: Context): void {
-  const services = ctx as Context & { connection: HostConnectionHandle; workspaceRegistry: WorkspaceRegistryLike }
-  const connection = services.connection
+  const services = ctx as Context & { workspaceRegistry: WorkspaceRegistryLike }
   const domainPromise = ctx.storageDomain.open(workbookDomainSpec)
+  let disposed = false
+  const close = async () => {
+    disposed = true
+    await (await domainPromise).close()
+  }
+  // Register the RPC channel directly on the HTTP server instead of through
+  // `connection.rpc.handle`. Connection's own route registration reaches
+  // `webServer` through the context its methods run on, and the context a
+  // plugin effect runs on does not carry the effect owner's inject list, so
+  // `webServer` resolves for the plugin context but not inside that effect:
+  // the call fails with `cannot get property "webServer" without inject` and
+  // the whole plugin tree fails to load. Registering here keeps the wire
+  // contract identical — same channel path, same `client-request` /
+  // `server-response` envelope the browser-side `connection.rpc.call` speaks.
+  let unregister: (() => Promise<void> | void) | undefined
   ctx.effect(() => {
-    let disposed = false
-    const close = async () => {
-      disposed = true
-      await (await domainPromise).close()
+    const channel = '/dsh-univer-create'
+    const jsonResponse = (rpcId: string, result: unknown): Response => new Response(JSON.stringify({
+      type: 'server-response',
+      rpcId,
+      result,
+    }), { headers: { 'content-type': 'application/json' } })
+    const envelopeHandler = async (request: Request): Promise<Response> => {
+      if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
+      if ((request.headers.get('content-type') ?? '').split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        return new Response('content type must be application/json', { status: 415 })
+      }
+      let body: { type?: unknown; rpcId?: unknown; method?: unknown; payload?: unknown }
+      try {
+        body = await request.json() as typeof body
+      } catch {
+        return new Response('body is not JSON', { status: 400 })
+      }
+      const rpcId = typeof body.rpcId === 'string' ? body.rpcId : 'invalid-request'
+      const endpoint = new URL(request.url).pathname.slice(channel.length + 1)
+      if (body.type !== 'client-request' || typeof body.method !== 'string' || endpoint === '' || endpoint !== body.method) {
+        return jsonResponse(rpcId, { ok: false, error: { code: 'gateway/bad-request', message: 'invalid client-request message', details: {} } })
+      }
+      try {
+        return jsonResponse(rpcId, await handler(body.method, body.payload, request.signal))
+      } catch (error) {
+        return new Response(`handler failure: ${String(error)}`, { status: 500 })
+      }
     }
-    const unregister = connection.rpc.handle('/dsh-univer-create', async (endpoint, payload) => {
+    const handler = async (endpoint: string, payload: unknown, _signal?: AbortSignal): Promise<unknown> => {
       const request = payload as {
         sessionId?: unknown
         unitType?: unknown
@@ -284,11 +320,33 @@ export function apply(ctx: Context): void {
         return { ok: true, value: saved }
       }
       return { ok: false, error: { code: 'not-found', message: `unknown endpoint: ${endpoint}`, details: {} } } as any
-    }, { authority: 'trusted-host' })
-    return async () => {
-      await unregister()
-      await close()
     }
+    return (ctx as Context & { webServer: { register: (route: { kind: string; path: string; handler: (req: any, res: any) => void }) => () => void } }).webServer.register({
+      kind: 'prefix',
+      path: channel,
+      handler: (req: any, res: any) => {
+        const chunks: Buffer[] = []
+        req.on('data', (chunk: Buffer) => chunks.push(chunk))
+        req.on('end', () => {
+          const request = new Request(new URL(req.url ?? '/', 'http://dsh.internal'), {
+            method: req.method ?? 'GET',
+            headers: Object.fromEntries(Object.entries(req.headers as Record<string, unknown>).filter(([, value]) => typeof value === 'string')) as Record<string, string>,
+            ...(chunks.length > 0 ? { body: Buffer.concat(chunks) } : {}),
+          })
+          envelopeHandler(request).then(async (response) => {
+            res.writeHead(response.status, Object.fromEntries(response.headers))
+            res.end(Buffer.from(await response.arrayBuffer()))
+          }, (error: unknown) => {
+            res.writeHead(500)
+            res.end(String(error))
+          })
+        })
+      },
+    })
+  }, 'dsh-univer-create: rpc channel')
+  ctx.effect(() => async () => {
+    await unregister?.()
+    await close()
   }, 'dsh-univer-create: host persistence')
 
   ctx.tools.register(defineTool({

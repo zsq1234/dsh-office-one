@@ -4,7 +4,11 @@
 
 - `univer-create`：对话中的 Sheet、Doc、Slide 编辑器和模型工具。
 - `univer-file-export`：基于 Univer Exchange Node 的 Office 导入/导出服务。
-- `workspace-file-viewer`：Workspace 文件树、代码预览和 Office 文件编辑。
+- `workspace-file-viewer`：为 DSH 自带的 Workspace 文件列表增加 Office 文件打开、编辑和保存支持。
+
+## Workspace Office 预览
+
+插件不再注册独立的「Workspace 文件」对话 Tab。请在 DSH 自带的右侧 Workspace 文件列表中打开 `.xls`、`.xlsx`、`.csv`、`.doc`、`.docx`、`.ppt` 或 `.pptx`；内置文档预览会自动选择 `Office (Univer)` 渲染器，并复用原有 Univer 导入、编辑和保存流程。
 
 业务代码仍按 `src/modules/` 下的三个目录独立维护；`src/index.ts` 和 `src/client.ts` 只是薄组合入口。
 

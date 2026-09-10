@@ -30,7 +30,8 @@
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-primitives"
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
       ],
       "external": [
         "react",
@@ -41,7 +42,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "bundle": "tsdown --config tsdown.config.ts",
-    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs",
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs && node --test tests/client-bundle.test.mjs",
     "build": "pnpm typecheck && pnpm bundle && pnpm check",
     "watch": "tsdown --config tsdown.config.ts --watch",
     "clean": "rm -rf lib",
@@ -101,6 +102,8 @@
     "@univerjs/ui": "1.0.0-beta.2",
     "@univerjs/watermark": "1.0.0-beta.2",
     "prismjs": "1.30.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "rxjs": "7.8.2",
     "zod": "^4.4.3"
   },
