@@ -3,3 +3,6 @@ lib/
 .test-dsh-home/
 .pnpm-store-test/
 *.tgz
+
+# Local Univer Pro license (never commit credentials)
+/license-univer/

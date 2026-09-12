@@ -1,4 +1,6 @@
-import { LocaleType, mergeLocales, Univer, UniverInstanceType } from '@univerjs/core'
+import { UniverLicensePlugin } from '@univerjs-pro/license'
+import { CommandType, LocaleType, mergeLocales, Univer, UniverInstanceType } from '@univerjs/core'
+import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import { FUniver } from '@univerjs/core/facade'
 import DesignZhCN from '@univerjs/design/locale/zh-CN'
 import { UniverDocsPlugin } from '@univerjs/docs'
@@ -45,9 +47,9 @@ import { UniverThreadCommentUIPlugin } from '@univerjs/thread-comment-ui'
 import ThreadCommentUIZhCN from '@univerjs/thread-comment-ui/locale/zh-CN'
 import { UniverUIPlugin } from '@univerjs/ui'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
-import { UniverWatermarkPlugin } from '@univerjs/watermark'
 
 import '@univerjs/sheets/facade'
+import { isPersistableWorkbookMutation } from '../workbook-drafts.js'
 import '../styles.css'
 
 import '@univerjs/design/lib/index.css'
@@ -99,6 +101,7 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
   })
 
   univer.registerPlugin(UniverRenderEnginePlugin)
+  univer.registerPlugin(UniverLicensePlugin, { license: UNIVER_LICENSE })
   univer.registerPlugin(UniverFormulaEnginePlugin)
   univer.registerPlugin(UniverUIPlugin, { container })
   univer.registerPlugin(UniverDocsPlugin)
@@ -122,23 +125,6 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
   univer.registerPlugin(UniverSheetsThreadCommentUIPlugin)
   univer.registerPlugin(UniverSheetsTableUIPlugin)
   univer.registerPlugin(UniverSheetsNoteUIPlugin)
-  univer.registerPlugin(UniverWatermarkPlugin, {
-    textWatermarkSettings: {
-      content: 'Hello, Univer!',
-      fontSize: 16,
-      color: 'rgb(0,0,0)',
-      bold: false,
-      italic: false,
-      direction: 'ltr',
-      x: 60,
-      y: 36,
-      repeat: true,
-      spacingX: 200,
-      spacingY: 100,
-      rotate: 0,
-      opacity: 0.15,
-    },
-  })
   univer.registerPlugin(UniverSheetsCrosshairHighlightPlugin)
 
   univer.createUnit(UniverInstanceType.UNIVER_SHEET, snapshot as never)
@@ -146,8 +132,16 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
   // WorkbookDataModel.getSnapshot() only contains the core workbook model. The
   // facade save() path delegates to ResourceLoaderService.saveUnit(), which also
   // serializes plugin resources such as inserted Sheet drawings/images.
+  type RuntimeWorksheet = { getSheetId: () => string; getSheetName: () => string }
+  type RuntimeWorkbook = {
+    save: () => unknown
+    getId: () => string
+    getSheets: () => RuntimeWorksheet[]
+    getSheetBySheetId: (sheetId: string) => RuntimeWorksheet | null
+    getSheetByName: (name: string) => RuntimeWorksheet | null
+  }
   const univerAPI = FUniver.newAPI(univer) as FUniver & {
-    getActiveWorkbook: () => { save: () => unknown } | null
+    getActiveWorkbook: () => RuntimeWorkbook | null
   }
   const workbook = univerAPI.getActiveWorkbook()
   if (!workbook) {
@@ -155,7 +149,63 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
     throw new Error('failed to create active Sheet workbook')
   }
 
-  return { univer, workbook }
+  type RuntimeMutation = { id: string; params: Record<string, unknown>; subUnitName?: string }
+
+  const remapMutationTargets = (mutation: RuntimeMutation): Record<string, unknown> => {
+    const params = structuredClone(mutation.params)
+    const currentUnitId = workbook.getId()
+    const visited = new Set<object>()
+    const remapUnitIds = (value: unknown) => {
+      if (value === null || typeof value !== 'object' || visited.has(value)) return
+      visited.add(value)
+      if (Array.isArray(value)) {
+        value.forEach(remapUnitIds)
+        return
+      }
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (key === 'unitId' && typeof child === 'string') (value as Record<string, unknown>)[key] = currentUnitId
+        else remapUnitIds(child)
+      }
+    }
+    remapUnitIds(params)
+
+    const oldSheetId = params.subUnitId
+    if (typeof oldSheetId === 'string' && workbook.getSheetBySheetId(oldSheetId) === null) {
+      const byName = mutation.subUnitName ? workbook.getSheetByName(mutation.subUnitName) : null
+      const fallback = workbook.getSheets().length === 1 ? workbook.getSheets()[0] : null
+      const sheet = byName ?? fallback
+      if (sheet) params.subUnitId = sheet.getSheetId()
+    }
+    return params
+  }
+
+  const replayMutations = async (mutations: RuntimeMutation[]) => {
+    for (const mutation of mutations) {
+      if (!isPersistableWorkbookMutation(mutation)) continue
+      const result = await univerAPI.executeCommand(mutation.id, remapMutationTargets(mutation), {
+        onlyLocal: true,
+        dshDraftReplay: true,
+      })
+      if (result === false) throw new Error(`failed to replay workbook mutation: ${mutation.id}`)
+    }
+  }
+
+  const onMutation = (listener: (mutation: RuntimeMutation) => void) => univerAPI.addEvent(
+    univerAPI.Event.CommandExecuted,
+    (event) => {
+      if (event.type !== CommandType.MUTATION || event.options?.dshDraftReplay === true) return
+      const params = (event.params ?? {}) as Record<string, unknown>
+      const subUnitId = params.subUnitId
+      const mutation: RuntimeMutation = {
+        id: event.id,
+        params,
+        subUnitName: typeof subUnitId === 'string' ? workbook.getSheetBySheetId(subUnitId)?.getSheetName() : undefined,
+      }
+      if (isPersistableWorkbookMutation(mutation)) listener(mutation)
+    },
+  )
+
+  return { univer, workbook, replayMutations, onMutation }
 }
 
 ;(globalThis as any).__DSH_WORKSPACE_FILE_VIEWER__ = {

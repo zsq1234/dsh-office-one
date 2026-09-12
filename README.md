@@ -59,8 +59,25 @@ dsh plugin --profile web remove \
   dsh-workspace-file-viewer
 ```
 
+## Univer Pro License
+
+构建时会按以下优先级读取客户端 License，并将其注册到 Sheet、Doc、Slide 以及 Workspace Office 预览运行时的 `UniverLicensePlugin`：
+
+1. 环境变量 `UNIVER_CLIENT_LICENSE`；
+2. 项目根目录 `license-univer/license.txt`。
+
+本地使用时可执行：
+
+```bash
+cp -a /home/azeng/下载/license-univer ./license-univer
+pnpm build
+```
+
+`license-univer/` 已加入 `.gitignore`，不得提交到 Git。`licenseKey.txt` 会随目录保留，但当前浏览器插件注册只使用 `license.txt`。
+
 ## 环境变量
 
+- `UNIVER_CLIENT_LICENSE`：可选的 Univer 客户端 License；优先于本地 `license-univer/license.txt`。
 - `PORT`：Office 转换服务端口，默认 `8787`。
 - `CORS_ORIGIN`：转换服务允许的浏览器 Origin。
 - `UNIVER_FILE_IMPORT_ENDPOINT`：Workspace Viewer 使用的导入端点。

@@ -8,6 +8,9 @@ const PACKAGE_ID = 'dsh-office-one'
 const nodeRequire = createRequire(import.meta.url)
 const CSS_PREFIX = '\0dsh-office-one-css:'
 const CSS_SUFFIX = '.mjs'
+const UNIVER_LICENSE_MODULE = 'virtual:dsh-univer-license'
+const UNIVER_LICENSE_ID = '\0dsh-office-one-univer-license'
+const UNIVER_LICENSE_FILE = resolve('license-univer/license.txt')
 
 function cssTagId(path: string): string {
   const nodeModulesMarker = `${sep}node_modules${sep}`
@@ -52,6 +55,29 @@ function runtimeDependencyPlugin() {
     name: 'dsh-office-one-runtime-dependencies',
     resolveId(source: string) {
       return paths.get(source) ?? null
+    },
+  }
+}
+
+function univerLicensePlugin() {
+  return {
+    name: 'dsh-office-one-univer-license',
+    resolveId(source: string) {
+      return source === UNIVER_LICENSE_MODULE ? UNIVER_LICENSE_ID : null
+    },
+    async load(id: string) {
+      if (id !== UNIVER_LICENSE_ID) return null
+      const environmentLicense = process.env.UNIVER_CLIENT_LICENSE?.trim()
+      if (environmentLicense) return `export const UNIVER_LICENSE = ${JSON.stringify(environmentLicense)};`
+
+      try {
+        this.addWatchFile(UNIVER_LICENSE_FILE)
+        const license = (await readFile(UNIVER_LICENSE_FILE, 'utf8')).trim()
+        return `export const UNIVER_LICENSE = ${JSON.stringify(license)};`
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        return 'export const UNIVER_LICENSE = "";'
+      }
     },
   }
 }
@@ -118,7 +144,7 @@ const browserShared = {
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
   },
-  plugins: [vfileBrowserPlugin(), dedupeRediPlugin(), cssPlugin()],
+  plugins: [vfileBrowserPlugin(), dedupeRediPlugin(), univerLicensePlugin(), cssPlugin()],
 }
 
 export default defineConfig([
@@ -158,8 +184,8 @@ export default defineConfig([
     name: `${PACKAGE_ID}/sheet-runtime`,
     entry: { sheet: 'src/modules/workspace-file-viewer/client/runtimes/sheet.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
-    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), cssPlugin()],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
+    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/sheet.js',
       inlineDynamicImports: true,
@@ -174,8 +200,8 @@ export default defineConfig([
     name: `${PACKAGE_ID}/docs-runtime`,
     entry: { docs: 'src/modules/workspace-file-viewer/client/runtimes/docs.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
-    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), cssPlugin()],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
+    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/docs.js',
       inlineDynamicImports: true,
@@ -191,7 +217,7 @@ export default defineConfig([
     entry: { slides: 'src/modules/workspace-file-viewer/client/runtimes/slides.ts' },
     external: [/^@deepseek-ai\//],
     noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/shape-editor-ui', '@univerjs-pro/shape-editor-ui/locale/zh-CN', '@univerjs-pro/slides', '@univerjs-pro/slides/facade', '@univerjs-pro/slides-ui', '@univerjs-pro/slides-ui/locale/zh-CN', '@univerjs-pro/engine-shape', '@univerjs-pro/engine-formula', /^@univerjs\//],
-    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), cssPlugin()],
+    plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/slides.js',
       inlineDynamicImports: true,

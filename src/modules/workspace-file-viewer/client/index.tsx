@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Prism from 'prismjs'
 import 'prismjs/components/prism-typescript'
 import 'prismjs/components/prism-jsx'
@@ -17,6 +17,14 @@ import 'prismjs/components/prism-yaml'
 import 'prismjs/components/prism-markdown'
 
 import { MarkdownPreview, isMarkdown, canPreviewMarkdown } from './markdown.js'
+import {
+  appendWorkbookMutation,
+  clearWorkbookDraft,
+  commitWorkbookDraft,
+  loadWorkbookDraft,
+  workbookDraftKey,
+  type WorkbookMutation,
+} from './workbook-drafts.js'
 import './styles.css'
 
 type Entry = {
@@ -38,7 +46,13 @@ type DirectoryState = {
 }
 
 type SaveableUnit = { save?: () => unknown; getSnapshot?: () => unknown }
-type UniverSheetRuntime = { univer: { dispose: () => void }; workbook: SaveableUnit }
+type Disposable = { dispose: () => void }
+type UniverSheetRuntime = {
+  univer: Disposable
+  workbook: SaveableUnit
+  replayMutations: (mutations: WorkbookMutation[]) => Promise<void>
+  onMutation: (listener: (mutation: WorkbookMutation) => void) => Disposable
+}
 type UniverDocumentRuntime = { univer: { dispose: () => void }; univerAPI: { createDocument: (snapshot: unknown) => SaveableUnit; getActiveDocument?: () => SaveableUnit | null } }
 type UniverSlidesRuntime = { dispose: () => void; createUnit: (type: unknown, snapshot: unknown) => SaveableUnit }
 type SnapshotProviderRef = React.MutableRefObject<(() => unknown) | null>
@@ -263,6 +277,196 @@ function unitSnapshot(unit: SaveableUnit | null | undefined): unknown {
   throw new Error('当前 Univer 运行时无法生成可保存的数据')
 }
 
+type DraftIdentity = {
+  fileKey: string
+  baseModified: string
+  lastSequence: number
+}
+
+function useWorkbookDraftManager() {
+  const [mutations, setMutations] = useState<WorkbookMutation[]>([])
+  const [status, setStatus] = useState('')
+  const identityRef = useRef<DraftIdentity | null>(null)
+  const generationRef = useRef(0)
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve())
+  const pendingWritesRef = useRef(0)
+  const hasWriteFailureRef = useRef(false)
+  const shouldWarnBeforeUnloadRef = useRef(false)
+  const releaseLockRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!shouldWarnBeforeUnloadRef.current) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => {
+      generationRef.current += 1
+      window.removeEventListener('beforeunload', beforeUnload)
+      releaseLockRef.current?.()
+      releaseLockRef.current = null
+    }
+  }, [])
+
+  const releaseLockAfterWrites = useCallback(() => {
+    const release = releaseLockRef.current
+    releaseLockRef.current = null
+    if (release) writeChainRef.current = writeChainRef.current.then(release, release)
+  }, [])
+
+  const reset = useCallback(() => {
+    generationRef.current += 1
+    releaseLockAfterWrites()
+    identityRef.current = null
+    shouldWarnBeforeUnloadRef.current = pendingWritesRef.current > 0 || hasWriteFailureRef.current
+    setMutations([])
+    setStatus('')
+  }, [releaseLockAfterWrites])
+
+  const restore = useCallback(async (sessionId: string, path: string, baseModified: string): Promise<WorkbookMutation[] | null> => {
+    const generation = ++generationRef.current
+    const fileKey = workbookDraftKey(sessionId, path)
+    setStatus('正在检查本地草稿…')
+    await writeChainRef.current
+    if (generationRef.current !== generation) return null
+
+    if (navigator.locks) {
+      const lockHandle: { release?: () => void } = {}
+      let resolveAcquired!: (acquired: boolean) => void
+      const acquired = new Promise<boolean>((resolve) => { resolveAcquired = resolve })
+      void navigator.locks.request(`dsh-office-one:${fileKey}`, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        resolveAcquired(lock !== null)
+        if (lock !== null) await new Promise<void>((resolve) => { lockHandle.release = resolve })
+      }).catch(() => resolveAcquired(false))
+      if (!await acquired) {
+        if (generationRef.current === generation) setStatus('此表格已在另一个页面中编辑，请关闭另一页面后重试')
+        return null
+      }
+      if (generationRef.current !== generation) {
+        lockHandle.release?.()
+        return null
+      }
+      releaseLockRef.current = () => lockHandle.release?.()
+    }
+
+    try {
+      const loaded = await loadWorkbookDraft(fileKey, baseModified)
+      if (generationRef.current !== generation) return []
+      if (loaded.conflictModified !== undefined) {
+        const discard = window.confirm('检测到本地草稿，但 Workspace 文件已经变化。\n\n选择“确定”将放弃旧草稿并打开最新文件；选择“取消”会保留草稿且停止打开。')
+        if (!discard) {
+          setStatus('已保留冲突草稿；请先处理文件版本冲突')
+          releaseLockRef.current?.()
+          releaseLockRef.current = null
+          return null
+        }
+        await clearWorkbookDraft(fileKey)
+        if (generationRef.current !== generation) return null
+        identityRef.current = { fileKey, baseModified, lastSequence: 0 }
+        setMutations([])
+        setStatus('旧草稿已放弃，已打开文件最新版本')
+        return []
+      }
+      identityRef.current = { fileKey, baseModified, lastSequence: loaded.lastSequence }
+      setMutations(loaded.mutations)
+      if (loaded.mutations.length > 0) {
+        const ignored = loaded.skippedMutations > 0 ? `，已忽略 ${loaded.skippedMutations} 条临时编辑器操作` : ''
+        setStatus(`正在恢复 ${loaded.mutations.length} 条本地修改${ignored}…`)
+      } else {
+        setStatus(loaded.skippedMutations > 0 ? `已忽略 ${loaded.skippedMutations} 条无须恢复的临时编辑器操作` : '')
+      }
+      return loaded.mutations
+    } catch (reason) {
+      if (generationRef.current !== generation) return []
+      identityRef.current = { fileKey, baseModified, lastSequence: 0 }
+      setMutations([])
+      setStatus(`草稿读取失败：${reason instanceof Error ? reason.message : String(reason)}`)
+      return []
+    }
+  }, [])
+
+  const record = useCallback((mutation: WorkbookMutation) => {
+    const identity = identityRef.current
+    if (!identity) return
+    const generation = generationRef.current
+    const fileKey = identity.fileKey
+    pendingWritesRef.current += 1
+    shouldWarnBeforeUnloadRef.current = true
+    setStatus('正在保存本地草稿…')
+
+    writeChainRef.current = writeChainRef.current
+      .then(async () => {
+        const sequence = await appendWorkbookMutation(fileKey, identity.baseModified, mutation)
+        if (generationRef.current === generation && identityRef.current?.fileKey === fileKey) {
+          identityRef.current.lastSequence = Math.max(identityRef.current.lastSequence, sequence)
+        }
+      })
+      .then(() => {
+        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1)
+        if (pendingWritesRef.current === 0 && !hasWriteFailureRef.current) shouldWarnBeforeUnloadRef.current = false
+        if (generationRef.current === generation && identityRef.current?.fileKey === fileKey && pendingWritesRef.current === 0) {
+          setStatus('草稿已保存')
+        }
+      }, (reason) => {
+        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1)
+        hasWriteFailureRef.current = true
+        shouldWarnBeforeUnloadRef.current = true
+        if (generationRef.current === generation && identityRef.current?.fileKey === fileKey) {
+          setStatus(`草稿保存失败：${reason instanceof Error ? reason.message : String(reason)}`)
+        }
+      })
+  }, [])
+
+  const prepareSave = useCallback(async () => {
+    await writeChainRef.current
+    const identity = identityRef.current
+    return identity ? { ...identity } : null
+  }, [])
+
+  const commitSaved = useCallback(async (prepared: DraftIdentity | null, nextBaseModified: string) => {
+    const identity = identityRef.current
+    if (!prepared || !identity || identity.fileKey !== prepared.fileKey) return
+    const generation = generationRef.current
+    const commitTask = writeChainRef.current.then(async () => {
+      const remaining = await commitWorkbookDraft(
+        prepared.fileKey,
+        prepared.baseModified,
+        nextBaseModified,
+        prepared.lastSequence,
+      )
+      identity.baseModified = nextBaseModified
+      if (generationRef.current !== generation || identityRef.current !== identity) return
+      if (!remaining) identity.lastSequence = 0
+      hasWriteFailureRef.current = false
+      shouldWarnBeforeUnloadRef.current = pendingWritesRef.current > 0
+      setMutations([])
+      setStatus(remaining ? '文件已保存；之后的修改已存为草稿' : '')
+    })
+    writeChainRef.current = commitTask.catch(() => undefined)
+    try {
+      await commitTask
+    } catch (reason) {
+      shouldWarnBeforeUnloadRef.current = true
+      if (generationRef.current === generation) {
+        setStatus(`文件已写入，但草稿整理失败：${reason instanceof Error ? reason.message : String(reason)}`)
+      }
+      throw reason
+    }
+  }, [])
+
+  const markRestored = useCallback(() => {
+    setStatus((current) => current.startsWith('正在恢复') ? '已恢复本地草稿，尚未写回文件' : current)
+  }, [])
+
+  const markRestoreFailed = useCallback((reason: unknown) => {
+    shouldWarnBeforeUnloadRef.current = true
+    setStatus(`草稿恢复失败：${reason instanceof Error ? reason.message : String(reason)}`)
+  }, [])
+
+  return { mutations, status, reset, restore, record, prepareSave, commitSaved, markRestored, markRestoreFailed }
+}
+
 type DocumentPointMetadata = { startIndex: number; [key: string]: unknown }
 type DocumentBodySnapshot = {
   dataStream?: unknown
@@ -340,10 +544,37 @@ function normalizeDocumentSnapshot(value: unknown): unknown {
   return snapshot
 }
 
-function UniverWorkbook({ snapshot, snapshotProviderRef }: { snapshot: unknown; snapshotProviderRef: SnapshotProviderRef }) {
+function UniverWorkbook({
+  snapshot,
+  snapshotProviderRef,
+  draftMutations = [],
+  onDraftMutation,
+  onDraftRestored,
+  onDraftRestoreFailed,
+  editingDisabled = false,
+}: {
+  snapshot: unknown
+  snapshotProviderRef: SnapshotProviderRef
+  draftMutations?: WorkbookMutation[]
+  onDraftMutation?: (mutation: WorkbookMutation) => void
+  onDraftRestored?: () => void
+  onDraftRestoreFailed?: (reason: unknown) => void
+  editingDisabled?: boolean
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<UniverSheetRuntime | null>(null)
+  const mutationDisposableRef = useRef<Disposable | null>(null)
+  const onDraftMutationRef = useRef(onDraftMutation)
+  const onDraftRestoredRef = useRef(onDraftRestored)
+  const onDraftRestoreFailedRef = useRef(onDraftRestoreFailed)
   const [layoutVersion, setLayoutVersion] = useState(0)
+  onDraftMutationRef.current = onDraftMutation
+  onDraftRestoredRef.current = onDraftRestored
+  onDraftRestoreFailedRef.current = onDraftRestoreFailed
+
+  useEffect(() => {
+    if (containerRef.current) containerRef.current.inert = editingDisabled
+  }, [editingDisabled])
 
   useLayoutEffect(() => {
     const container = containerRef.current
@@ -368,15 +599,30 @@ function UniverWorkbook({ snapshot, snapshotProviderRef }: { snapshot: unknown; 
       if (cancelled) return
       if (!createSheetRuntime) throw new Error('sheet runtime factory is unavailable')
       const runtime = createSheetRuntime(mount, snapshot)
-      if (cancelled) queueRuntimeDispose(() => runtime.univer.dispose())
-      else {
-        runtimeRef.current = runtime
-        snapshotProviderRef.current = () => unitSnapshot(runtime.workbook)
+      if (cancelled) {
+        queueRuntimeDispose(() => runtime.univer.dispose())
+        return
       }
+      runtimeRef.current = runtime
+      snapshotProviderRef.current = () => unitSnapshot(runtime.workbook)
+      if (draftMutations.length > 0) {
+        try {
+          await runtime.replayMutations(draftMutations)
+          if (cancelled) return
+          onDraftRestoredRef.current?.()
+        } catch (reason) {
+          if (cancelled) return
+          console.error('Failed to replay workbook draft', reason)
+          onDraftRestoreFailedRef.current?.(reason)
+        }
+      }
+      mutationDisposableRef.current = runtime.onMutation((mutation) => onDraftMutationRef.current?.(mutation))
     }).catch((reason) => { if (!cancelled) console.error('Failed to load Sheet preview', reason) })
     return () => {
       cancelled = true
       snapshotProviderRef.current = null
+      mutationDisposableRef.current?.dispose()
+      mutationDisposableRef.current = null
       const runtime = runtimeRef.current
       if (runtime) {
         runtimeRef.current = null
@@ -552,6 +798,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
   const fileRequestRef = useRef<AbortController | null>(null)
   const snapshotProviderRef = useRef<(() => unknown) | null>(null)
   const saveRequestVersionRef = useRef(0)
+  const workbookDraft = useWorkbookDraftManager()
 
   const loadDirectory = async (path: string, cursor = '') => {
     directoryRequestsRef.current.get(path)?.abort()
@@ -641,6 +888,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
     snapshotProviderRef.current = null
     saveRequestVersionRef.current += 1
     setSaving(false)
+    workbookDraft.reset()
     refreshTree()
     return () => {
       for (const controller of directoryRequestsRef.current.values()) controller.abort()
@@ -651,6 +899,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
 
   const openFile = async (path: string) => {
     fileRequestRef.current?.abort()
+    workbookDraft.reset()
     const controller = new AbortController()
     fileRequestRef.current = controller
     setSelected(path)
@@ -680,8 +929,12 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
       // becomes React state. Re-serializing the whole unit (as the old
       // JSON.parse(JSON.stringify(...)) clone did) overflows the engine's
       // string allocation limit on large files.
-      if (isWorkbook) setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
-      else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
+      if (isWorkbook) {
+        const restored = await workbookDraft.restore(sessionId, path, payload.modified || '')
+        if (controller.signal.aborted) return
+        if (restored === null) throw new Error('表格当前无法安全打开，请查看草稿状态提示')
+        setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
+      } else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
       else if (isSlides) setSlidesData(payload.presentation)
       else setContent(payload.content)
     } catch (reason) {
@@ -712,6 +965,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
     setSaving(true)
     setSaveStatus('')
     try {
+      const preparedDraft = target.unitType === 'sheet' ? await workbookDraft.prepareSave() : null
       const snapshot = getSnapshot()
       const response = await fetch(`/api/workspace-office-save?sessionId=${encodeURIComponent(activeSessionId)}`, {
         method: 'POST',
@@ -728,9 +982,13 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
       if (!response.ok) throw new Error(payload.error || '保存失败')
       if (saveRequestVersionRef.current === requestVersion) {
         const savedAsNewFile = payload.path !== path
+        if (target.unitType === 'sheet') await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
         setSaveStatus(`${savedAsNewFile ? '已另存为' : '已保存'} ${payload.path}`)
         setLoadedModified(payload.modified || '')
         if (savedAsNewFile) {
+          workbookDraft.reset()
+          const rebound = await workbookDraft.restore(activeSessionId, payload.path, payload.modified || '')
+          if (rebound === null) throw new Error('文件已另存，但无法取得新文件的草稿编辑锁；请重新打开该文件')
           setSelected(payload.path)
           setWorkbook(normalizeWorkbookSnapshot(snapshot))
           void loadDirectory('')
@@ -823,10 +1081,24 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
           {!loading && directories['']?.loaded && directories[''].entries.length === 0 && <div className="dsh-wfv-muted">目录为空</div>}
         </nav>
         <main className={`dsh-wfv-content${workbook !== null || documentData !== null || slidesData !== null ? ' dsh-wfv-content-univer' : ''}`}>
-          {selected && <div className="dsh-wfv-path"><span>{selected}</span>{saveStatus && <span className="dsh-wfv-save-status" role="status">{saveStatus}</span>}</div>}
+          {selected && <div className="dsh-wfv-path"><span>{selected}</span>{(saveStatus || workbookDraft.status) && <span className="dsh-wfv-save-status" role="status">{saveStatus || workbookDraft.status}</span>}</div>}
           {fileLoading && <div className="dsh-wfv-muted">正在通过 dsh-univer-file-export 转换并加载…</div>}
           {!fileLoading && error && <div className="dsh-wfv-error">{error}</div>}
-          {!fileLoading && workbook !== null && <UniverWorkbook key={selected} snapshot={workbook} snapshotProviderRef={snapshotProviderRef} />}
+          {!fileLoading && workbook !== null && (
+            <UniverWorkbook
+              key={selected}
+              snapshot={workbook}
+              snapshotProviderRef={snapshotProviderRef}
+              draftMutations={workbookDraft.mutations}
+              onDraftMutation={(mutation) => {
+                setSaveStatus('')
+                workbookDraft.record(mutation)
+              }}
+              onDraftRestored={workbookDraft.markRestored}
+              onDraftRestoreFailed={workbookDraft.markRestoreFailed}
+              editingDisabled={saving}
+            />
+          )}
           {!fileLoading && documentData !== null && <UniverDocument key={selected} snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
           {!fileLoading && slidesData !== null && <UniverSlides key={selected} snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
           {!fileLoading && content !== null && <>
@@ -887,8 +1159,10 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
   const [saveStatus, setSaveStatus] = useState('')
   const snapshotProviderRef = useRef<(() => unknown) | null>(null)
   const requestVersionRef = useRef(0)
+  const workbookDraft = useWorkbookDraftManager()
 
   useEffect(() => {
+    workbookDraft.reset()
     setWorkbook(null)
     setDocumentData(null)
     setSlidesData(null)
@@ -914,8 +1188,12 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
         if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
         if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
         setLoadedModified(payload.modified || '')
-        if (isWorkbook) setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
-        else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
+        if (isWorkbook) {
+          const restored = await workbookDraft.restore(file.sessionId, file.path, payload.modified || '')
+          if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
+          if (restored === null) throw new Error('表格当前无法安全打开，请查看草稿状态提示')
+          setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
+        } else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
         else setSlidesData(payload.presentation)
       } catch (reason) {
         if (!controller.signal.aborted && requestVersionRef.current === requestVersion) {
@@ -945,6 +1223,8 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     setSaving(true)
     setSaveStatus('')
     try {
+      const preparedDraft = target.unitType === 'sheet' ? await workbookDraft.prepareSave() : null
+      const snapshot = getSnapshot()
       const response = await fetch(`/api/workspace-office-save?sessionId=${encodeURIComponent(file.sessionId)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -953,15 +1233,22 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
           unitType: target.unitType,
           format: target.format,
           expectedModified: loadedModified,
-          data: getSnapshot(),
+          data: snapshot,
         }),
       })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || '保存失败')
       if (requestVersionRef.current === requestVersion) {
         const savedAsNewFile = payload.path !== file.path
-        setSaveStatus(`${savedAsNewFile ? '已另存为' : '已保存'} ${payload.path}`)
-        setLoadedModified(payload.modified || '')
+        if (target.unitType === 'sheet') await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
+        if (savedAsNewFile) {
+          workbookDraft.reset()
+          setWorkbook(null)
+          setSaveStatus(`已另存为 ${payload.path}；请从 Workspace 打开新文件继续编辑`)
+        } else {
+          setSaveStatus(`已保存 ${payload.path}`)
+          setLoadedModified(payload.modified || '')
+        }
       }
     } catch (reason) {
       if (requestVersionRef.current === requestVersion) setSaveStatus(reason instanceof Error ? reason.message : String(reason))
@@ -979,7 +1266,7 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     <section ref={scrollportRef} className="dsh-wfv-office" data-office-preview={file.path}>
       <div className="dsh-wfv-office-toolbar">
         <span className="dsh-wfv-office-status" role="status">
-          {loading ? '正在通过 dsh-univer-file-export 转换并加载…' : error || saveStatus}
+          {loading ? '正在通过 dsh-univer-file-export 转换并加载…' : error || saveStatus || workbookDraft.status}
         </span>
         {loaded && (
           <button
@@ -994,7 +1281,20 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
         )}
       </div>
       <div className="dsh-wfv-office-editor">
-        {!loading && !error && workbook !== null && <UniverWorkbook snapshot={workbook} snapshotProviderRef={snapshotProviderRef} />}
+        {!loading && !error && workbook !== null && (
+          <UniverWorkbook
+            snapshot={workbook}
+            snapshotProviderRef={snapshotProviderRef}
+            draftMutations={workbookDraft.mutations}
+            onDraftMutation={(mutation) => {
+              setSaveStatus('')
+              workbookDraft.record(mutation)
+            }}
+            onDraftRestored={workbookDraft.markRestored}
+            onDraftRestoreFailed={workbookDraft.markRestoreFailed}
+            editingDisabled={saving}
+          />
+        )}
         {!loading && !error && documentData !== null && <UniverDocument snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
         {!loading && !error && slidesData !== null && <UniverSlides snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
       </div>

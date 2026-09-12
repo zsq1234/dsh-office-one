@@ -12,6 +12,14 @@ test('client bundle requires only DSH-provided React modules', async () => {
   }
 })
 
+test('workspace office runtimes contain no unresolved CommonJS imports', async () => {
+  for (const runtime of ['sheet', 'docs', 'slides']) {
+    const code = await readFile(new URL(`../lib/runtimes/${runtime}.js`, import.meta.url), 'utf8')
+    const imports = [...code.matchAll(/(?:^|[^\w$.])require\(\s*["']([^"']+)["']\s*\)/gm)].map((match) => match[1])
+    assert.deepEqual([...new Set(imports)], [], `${runtime} runtime must be directly executable in a browser`)
+  }
+})
+
 test('client extends the built-in document preview without its own Workspace tab', async () => {
   const code = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))

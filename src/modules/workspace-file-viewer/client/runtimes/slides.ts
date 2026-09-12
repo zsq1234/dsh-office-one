@@ -1,4 +1,5 @@
 import { UniverLicensePlugin } from '@univerjs-pro/license'
+import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { UniverSlidesPlugin } from '@univerjs-pro/slides'
 import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
@@ -35,7 +36,7 @@ export function createSlidesRuntime(container: HTMLElement) {
   univer.registerPlugin(UniverDocsPlugin)
   univer.registerPlugin(UniverDocsUIPlugin)
   univer.registerPlugin(UniverDrawingPlugin)
-  univer.registerPlugin(UniverLicensePlugin)
+  univer.registerPlugin(UniverLicensePlugin, { license: UNIVER_LICENSE })
   univer.registerPlugin(UniverSlidesPlugin)
   univer.registerPlugin(UniverSlidesUIPlugin)
 
