@@ -13,6 +13,7 @@ export const inject = [
   'storageDomain',
   'workspaceRegistry',
   'webServer',
+  'attachments',
 ]
 
 /** Mount the three independently maintained Host modules as one DSH plugin. */

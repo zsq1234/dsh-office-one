@@ -7,7 +7,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 import { z } from 'zod'
 
 export const name = 'dsh-univer-create'
-export const inject = ['tools', 'connection', 'storageDomain', 'workspaceRegistry']
+export const inject = ['tools', 'connection', 'storageDomain', 'workspaceRegistry', 'attachments']
 
 const queuedSheetOperationSchema = z.object({
   id: z.string(),
@@ -20,6 +20,20 @@ const workbookRowSchema = z.object({
   filePath: z.string().nullable().optional(),
   queuedSheetOperations: z.array(queuedSheetOperationSchema).optional(),
 })
+
+interface SlideScreenshotRequest {
+  id: string
+  slideIndex: number
+  mode: 'slide' | 'editor'
+  createdAt: number
+}
+
+interface SlideScreenshotResult {
+  dataUrl?: string
+  width?: number
+  height?: number
+  error?: string
+}
 const workbookDomainSpec = defineDomain({
   name: 'dsh_univer_sheet',
   version: 1,
@@ -43,6 +57,29 @@ const output = {
   render: (_args: unknown, value: { ok: boolean; action: string; message: string }) => [
     { type: 'text' as const, text: value.message },
   ],
+}
+
+const imageValueSchema = {
+  type: 'object',
+  required: true,
+  additionalProperties: false,
+  properties: {
+    attachmentId: { type: 'string' as const, required: true },
+    mediaType: { type: 'string' as const, enum: ['image/png'] as const, required: true },
+    bytes: { type: 'integer' as const, required: true },
+    width: { type: 'integer' as const, required: true },
+    height: { type: 'integer' as const, required: true },
+    name: { type: 'string' as const },
+  },
+} as const
+
+type ScreenshotImageValue = {
+  attachmentId: string
+  mediaType: 'image/png'
+  bytes: number
+  width: number
+  height: number
+  name?: string
 }
 
 type CellValue = string | number | boolean | null
@@ -127,11 +164,28 @@ function readDocumentText(snapshot: unknown): { title: string; text: string } {
   }
 }
 
+interface SlideElementSummary {
+  id: string
+  type: string
+  text?: string
+  left?: number
+  top?: number
+  width?: number
+  height?: number
+  rotation?: number
+  fontSize?: number
+  fontColor?: string
+  bold?: boolean
+  visible?: boolean
+}
+
 interface SlideSummary {
   index: number
   id: string
   title: string
-  elements: Array<{ id: string; type: string; text?: string }>
+  width: number
+  height: number
+  elements: SlideElementSummary[]
 }
 
 function readPresentation(snapshot: unknown): { title: string; slides: SlideSummary[] } {
@@ -148,19 +202,33 @@ function readPresentation(snapshot: unknown): { title: string; slides: SlideSumm
     const rawElements = elementOrder
       .map((elementId: unknown) => typeof elementId === 'string' ? page.elements?.[elementId] : undefined)
       .filter((element: unknown): element is Record<string, any> => element !== null && typeof element === 'object')
+    const pageSize = page.pageSize ?? presentation.defaultPageSize ?? {}
     return {
       index,
       id: pageId,
       title: typeof page.name === 'string' && page.name.length > 0 ? page.name : `幻灯片 ${index + 1}`,
+      width: typeof pageSize.width === 'number' ? pageSize.width : 960,
+      height: typeof pageSize.height === 'number' ? pageSize.height : 540,
       elements: rawElements.map((element) => {
         const dataStream = element.textData?.body?.dataStream
         const richText = typeof dataStream === 'string'
           ? dataStream.replace(/\r\n\0?$/, '').replaceAll('\r', '\n').replace(/\n$/, '')
           : undefined
+        const transform = element.transform !== null && typeof element.transform === 'object' ? element.transform : {}
+        const style = element.textStyle !== null && typeof element.textStyle === 'object' ? element.textStyle : {}
         return {
           id: typeof element.id === 'string' ? element.id : '',
           type: typeof element.type === 'string' ? element.type : 'other',
           ...(typeof element.text === 'string' ? { text: element.text } : richText !== undefined ? { text: richText } : {}),
+          ...(typeof transform.left === 'number' ? { left: transform.left } : {}),
+          ...(typeof transform.top === 'number' ? { top: transform.top } : {}),
+          ...(typeof transform.width === 'number' ? { width: transform.width } : {}),
+          ...(typeof transform.height === 'number' ? { height: transform.height } : {}),
+          ...(typeof transform.rotation === 'number' ? { rotation: transform.rotation } : {}),
+          ...(typeof style.fontSize === 'number' ? { fontSize: style.fontSize } : {}),
+          ...(typeof style.color === 'string' ? { fontColor: style.color } : {}),
+          ...(typeof style.bold === 'boolean' ? { bold: style.bold } : {}),
+          ...(typeof element.visible === 'boolean' ? { visible: element.visible } : {}),
         }
       }),
     }
@@ -246,6 +314,14 @@ export function apply(ctx: Context): void {
   const services = ctx as Context & { workspaceRegistry: WorkspaceRegistryLike }
   const domainPromise = ctx.storageDomain.open(workbookDomainSpec)
   const workbookUpdateLocks = new Map<string, Promise<void>>()
+  const slideScreenshotRequests = new Map<string, Map<string, SlideScreenshotRequest>>()
+  const slideScreenshotResults = new Map<string, SlideScreenshotResult>()
+  const activeSlideSessions = new Set<string>()
+  const requireActiveSlide = (sessionId: string) => {
+    if (!activeSlideSessions.has(sessionId)) {
+      throw new Error('请先打开当前会话的 Univer → Slide 页面，再调用 Slide 工具')
+    }
+  }
 
   const updateWorkbookRow = async (
     storageKey: string,
@@ -339,6 +415,12 @@ export function apply(ctx: Context): void {
         filePath?: unknown
         overwrite?: unknown
         operationIds?: unknown
+        screenshotId?: unknown
+        dataUrl?: unknown
+        width?: unknown
+        height?: unknown
+        error?: unknown
+        active?: unknown
       }
       if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
         return { ok: false, error: { code: 'invalid-arguments', message: 'sessionId is required', details: {} } } as any
@@ -361,6 +443,37 @@ export function apply(ctx: Context): void {
       }
       if (endpoint === 'sheet-operations') {
         return { ok: true, value: table.get(request.sessionId)?.queuedSheetOperations ?? [] }
+      }
+      if (endpoint === 'slide-runtime-heartbeat') {
+        if (request.active === true) activeSlideSessions.add(request.sessionId)
+        else activeSlideSessions.delete(request.sessionId)
+        return { ok: true, value: { active: activeSlideSessions.has(request.sessionId) } }
+      }
+      if (endpoint === 'slide-screenshot-requests') {
+        return { ok: true, value: [...(slideScreenshotRequests.get(request.sessionId)?.values() ?? [])] }
+      }
+      if (endpoint === 'slide-screenshot-result') {
+        if (typeof request.screenshotId !== 'string') {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'screenshotId is required', details: {} } } as any
+        }
+        const pending = slideScreenshotRequests.get(request.sessionId)
+        if (!pending?.has(request.screenshotId)) {
+          return { ok: false, error: { code: 'not-found', message: 'screenshot request is no longer pending', details: {} } } as any
+        }
+        const result: SlideScreenshotResult = typeof request.error === 'string'
+          ? { error: request.error }
+          : {
+              dataUrl: typeof request.dataUrl === 'string' ? request.dataUrl : undefined,
+              width: typeof request.width === 'number' ? request.width : undefined,
+              height: typeof request.height === 'number' ? request.height : undefined,
+            }
+        if (result.error === undefined && (result.dataUrl === undefined || result.width === undefined || result.height === undefined)) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'dataUrl, width, and height are required', details: {} } } as any
+        }
+        slideScreenshotResults.set(request.screenshotId, result)
+        pending.delete(request.screenshotId)
+        if (pending.size === 0) slideScreenshotRequests.delete(request.sessionId)
+        return { ok: true, value: { accepted: true } }
       }
       if (endpoint === 'ack-sheet-operations') {
         if (!Array.isArray(request.operationIds) || !request.operationIds.every((id) => typeof id === 'string')) {
@@ -769,7 +882,10 @@ export function apply(ctx: Context): void {
       height: { type: 'number', description: 'Slide height in canvas units. Defaults to 540.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能创建演示文稿')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'new-slide', message: `已创建 Univer 演示文稿“${args.title ?? '对话演示文稿'}”。` }
     },
   }))
@@ -795,6 +911,8 @@ export function apply(ctx: Context): void {
                 index: { type: 'integer', required: true },
                 id: { type: 'string', required: true },
                 title: { type: 'string', required: true },
+                width: { type: 'number', required: true },
+                height: { type: 'number', required: true },
                 elements: {
                   type: 'array',
                   required: true,
@@ -804,6 +922,15 @@ export function apply(ctx: Context): void {
                       id: { type: 'string', required: true },
                       type: { type: 'string', required: true },
                       text: { type: 'string' },
+                      left: { type: 'number' },
+                      top: { type: 'number' },
+                      width: { type: 'number' },
+                      height: { type: 'number' },
+                      rotation: { type: 'number' },
+                      fontSize: { type: 'number' },
+                      fontColor: { type: 'string' },
+                      bold: { type: 'boolean' },
+                      visible: { type: 'boolean' },
                     },
                     additionalProperties: false,
                   },
@@ -820,8 +947,9 @@ export function apply(ctx: Context): void {
       ],
     },
     async execute(_args, exec) {
-      const sessionId = exec.agent?.id
+      const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能读取演示文稿')
+      requireActiveSlide(sessionId)
       const stored = (await domainPromise).table('workbooks').get(`${sessionId}:slide`)
       const result = readPresentation(stored?.snapshot)
       return {
@@ -835,6 +963,97 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'univer_slide_screenshot',
+    description: 'Capture a rendered PNG of one slide and return the image to the model for visual inspection. Use after creating or changing slides to check overlap, clipping, hierarchy, contrast, and whitespace. The Univer Slide tab must be open in the browser.',
+    parameters: {
+      slideIndex: { type: 'integer', description: 'Zero-based slide index. Defaults to 0.' },
+      mode: { type: 'string', enum: ['slide', 'editor'], description: 'slide returns the clean rendered canvas; editor is intended for editor-render diagnostics. Defaults to slide.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          message: { type: 'string', required: true },
+          slideIndex: { type: 'integer', required: true },
+          image: imageValueSchema,
+        },
+      } as const,
+      render: (_args: unknown, value: { message: string; image: ScreenshotImageValue }) => [{
+        type: 'text' as const,
+        text: value.message,
+      }, {
+        type: 'image' as const,
+        attachment: {
+          attachmentId: value.image.attachmentId,
+          mediaType: value.image.mediaType,
+          bytes: value.image.bytes,
+          width: value.image.width,
+          height: value.image.height,
+          ...(value.image.name === undefined ? {} : { name: value.image.name }),
+        } as any,
+      }],
+    },
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取幻灯片')
+      requireActiveSlide(sessionId)
+      const slideIndex = args.slideIndex ?? 0
+      if (!Number.isInteger(slideIndex) || slideIndex < 0) throw new Error('slideIndex 必须是非负整数')
+      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:slide`)
+      if (stored?.snapshot === null || stored?.snapshot === undefined) {
+        throw new Error('当前没有已创建或已打开的演示文稿；请先在 Univer → Slide 中点击“新建”或“打开”')
+      }
+      const mode = args.mode ?? 'slide'
+      const request: SlideScreenshotRequest = { id: randomUUID(), slideIndex, mode, createdAt: Date.now() }
+      const pending = slideScreenshotRequests.get(sessionId) ?? new Map<string, SlideScreenshotRequest>()
+      pending.set(request.id, request)
+      slideScreenshotRequests.set(sessionId, pending)
+
+      const deadline = Date.now() + 15_000
+      let result: SlideScreenshotResult | undefined
+      try {
+        while (Date.now() < deadline) {
+          if (exec.signal.aborted) throw exec.signal.reason
+          result = slideScreenshotResults.get(request.id)
+          if (result !== undefined) break
+          await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
+        }
+      } finally {
+        slideScreenshotRequests.get(sessionId)?.delete(request.id)
+        if (slideScreenshotRequests.get(sessionId)?.size === 0) slideScreenshotRequests.delete(sessionId)
+        slideScreenshotResults.delete(request.id)
+      }
+      if (result === undefined) throw new Error('截图超时。请保持 Univer Slide 页签打开并重试。')
+      if (result.error !== undefined) throw new Error(`浏览器截图失败：${result.error}`)
+      const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
+      if (match === null) throw new Error('浏览器返回的截图不是有效 PNG data URL')
+      const data = Buffer.from(match[1]!, 'base64')
+      if (data.byteLength === 0 || data.byteLength > 20 * 1024 * 1024) throw new Error('截图大小无效或超过 20 MiB')
+      const attachments = (ctx as Context & { attachments?: { saveImage: (input: { data: Uint8Array; mediaType: 'image/png'; name?: string }) => Promise<any> } }).attachments
+      if (attachments === undefined) throw new Error('当前 DSH 未挂载附件服务，无法把截图返回给模型')
+      const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: `slide-${slideIndex + 1}.png` })
+      const image: ScreenshotImageValue = {
+        attachmentId: String(ref.attachmentId),
+        mediaType: 'image/png',
+        bytes: ref.bytes,
+        width: ref.width,
+        height: ref.height,
+        ...(ref.name === undefined ? {} : { name: ref.name }),
+      }
+      return {
+        ok: true,
+        action: 'slide-screenshot',
+        message: `第 ${slideIndex + 1} 张幻灯片截图（${image.width}×${image.height}）。请直接检查文字重叠、裁切、层级、对齐、对比度和留白。`,
+        slideIndex,
+        image,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'univer_slide_add',
     description: 'Add a blank slide to the current Univer presentation.',
     parameters: {
@@ -842,7 +1061,10 @@ export function apply(ctx: Context): void {
       index: { type: 'integer', description: 'Zero-based insertion index. Defaults to the end.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加幻灯片')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'add-slide', message: `已添加${args.title ? `“${args.title}”` : '一张'}幻灯片。` }
     },
   }))
@@ -854,7 +1076,10 @@ export function apply(ctx: Context): void {
       index: { type: 'integer', required: true, description: 'Zero-based slide index.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能删除幻灯片')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'delete-slide', message: `已删除第 ${args.index + 1} 张幻灯片。` }
     },
   }))
@@ -874,8 +1099,36 @@ export function apply(ctx: Context): void {
       bold: { type: 'boolean', description: 'Whether text is bold.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加文本')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'add-slide-text', message: `已向第 ${args.slideIndex + 1} 张幻灯片添加文本。` }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'univer_slide_add_shape',
+    description: 'Add a real editable Univer Slides shape. Supports rect, roundRect, ellipse, diamond, triangle, parallelogram, hexagon, star5 and other ShapeTypeEnum values. Set fillColor to transparent or strokeColor to none to remove fill or outline.',
+    parameters: {
+      slideIndex: { type: 'integer', required: true, description: 'Zero-based slide index.' },
+      shapeType: { type: 'string', required: true, description: 'Univer ShapeTypeEnum value, for example rect, roundRect, ellipse, diamond, triangle, hexagon, or star5.' },
+      left: { type: 'number', description: 'Left position in slide canvas units.' },
+      top: { type: 'number', description: 'Top position in slide canvas units.' },
+      width: { type: 'number', description: 'Shape width.' },
+      height: { type: 'number', description: 'Shape height.' },
+      fillColor: { type: 'string', description: 'Fill color such as #2563eb; use transparent for no fill.' },
+      strokeColor: { type: 'string', description: 'Outline color; use none for no outline.' },
+      strokeWidth: { type: 'number', description: 'Outline width. Defaults to 1.5.' },
+      opacity: { type: 'number', description: 'Opacity from 0 to 1.' },
+      selectable: { type: 'boolean', description: 'Whether the editor should show/select the shape. Defaults to true so users can select and edit it.' },
+    },
+    output,
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加形状')
+      requireActiveSlide(sessionId)
+      return { ok: true, action: 'add-slide-shape', message: `已向第 ${args.slideIndex + 1} 张幻灯片添加 ${args.shapeType} 形状。` }
     },
   }))
 
@@ -895,7 +1148,10 @@ export function apply(ctx: Context): void {
       bold: { type: 'boolean', description: 'Whether text is bold.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能更新文本')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'update-slide-text', message: `已更新幻灯片文本元素“${args.elementId}”。` }
     },
   }))
@@ -908,7 +1164,10 @@ export function apply(ctx: Context): void {
       elementId: { type: 'string', required: true, description: 'Element id.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能删除元素')
+      requireActiveSlide(sessionId)
       return { ok: true, action: 'delete-slide-element', message: `已删除幻灯片元素“${args.elementId}”。` }
     },
   }))

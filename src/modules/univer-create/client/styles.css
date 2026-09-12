@@ -1,4 +1,5 @@
 .dsh-univer-create-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -43,6 +44,24 @@
 .dsh-univer-create-product-tab.is-active {
   color: #fff;
   background: var(--dsw-alias-brand-primary, #2563eb);
+}
+
+.dsh-univer-create-product-pane {
+  position: absolute;
+  z-index: 0;
+  inset: 36px 0 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.dsh-univer-create-product-pane.is-active {
+  z-index: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.dsh-univer-create-product-pane > .dsh-univer-create-root {
+  height: 100%;
 }
 
 .dsh-univer-create-root {
@@ -272,22 +291,55 @@
   overflow: hidden;
   padding: 10px 12px;
   color: var(--dsw-alias-content-primary, #172033);
-  pointer-events: none;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
-  backdrop-filter: none;
-  opacity: .78;
+  pointer-events: auto;
+  /* Frosted, dusty surface keeps the live session feed readable over Univer. */
+  background: color-mix(in srgb, var(--dsw-alias-bg-base, #fff) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-border-subtle, #e5e7eb) 72%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 14%), inset 0 1px rgb(255 255 255 / 42%);
+  backdrop-filter: blur(14px) saturate(82%);
+  -webkit-backdrop-filter: blur(14px) saturate(82%);
+}
+
+@supports not (background: color-mix(in srgb, white 50%, transparent)) {
+  .dsh-univer-create-chat-overlay {
+    background: rgb(248 250 252 / 86%);
+    border-color: rgb(226 232 240 / 82%);
+  }
+}
+
+.dsh-univer-create-chat-overlay__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 5px;
 }
 
 .dsh-univer-create-chat-overlay__title {
-  flex: 0 0 auto;
-  padding-bottom: 5px;
   color: var(--dsw-alias-content-secondary, #64748b);
   font-size: 10px;
   letter-spacing: .08em;
   text-transform: uppercase;
+}
+
+.dsh-univer-create-chat-overlay__toggle {
+  padding: 2px 6px;
+  color: var(--dsw-alias-content-secondary, #475569);
+  pointer-events: auto;
+  cursor: pointer;
+  background: rgb(255 255 255 / 34%);
+  border: 1px solid rgb(148 163 184 / 34%);
+  border-radius: 5px;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.dsh-univer-create-chat-overlay__toggle:hover {
+  color: var(--dsw-alias-content-primary, #172033);
+  background: rgb(255 255 255 / 62%);
 }
 
 .dsh-univer-create-chat-overlay__stream {
@@ -297,6 +349,11 @@
   overflow-y: auto;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* The flex declaration above overrides the browser's default [hidden] rule. */
+.dsh-univer-create-chat-overlay__stream[hidden] {
+  display: none;
 }
 
 .dsh-univer-create-chat-overlay__line {

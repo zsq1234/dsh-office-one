@@ -44,6 +44,7 @@ function runtimeDependencyPlugin() {
     ['@univerjs-pro/slides/facade', nodeRequire.resolve('@univerjs-pro/slides/lib/es/facade.js')],
     ['@univerjs-pro/slides-ui', nodeRequire.resolve('@univerjs-pro/slides-ui/lib/es/index.js')],
     ['@univerjs-pro/engine-shape', nodeRequire.resolve('@univerjs-pro/engine-shape/lib/es/index.js')],
+    ['@univerjs-pro/engine-shape/facade', nodeRequire.resolve('@univerjs-pro/engine-shape/lib/es/facade.js')],
     ['@univerjs-pro/engine-formula', nodeRequire.resolve('@univerjs-pro/engine-formula/lib/es/index.js')],
     ['@univerjs/rpc', nodeRequire.resolve('@univerjs/rpc/lib/es/index.js')],
     ['@univerjs-pro/shape-editor-ui/lib/index.css', CSS_PREFIX + nodeRequire.resolve('@univerjs-pro/shape-editor-ui/lib/index.css') + CSS_SUFFIX],
@@ -216,7 +217,7 @@ export default defineConfig([
     name: `${PACKAGE_ID}/slides-runtime`,
     entry: { slides: 'src/modules/workspace-file-viewer/client/runtimes/slides.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/shape-editor-ui', '@univerjs-pro/shape-editor-ui/locale/zh-CN', '@univerjs-pro/slides', '@univerjs-pro/slides/facade', '@univerjs-pro/slides-ui', '@univerjs-pro/slides-ui/locale/zh-CN', '@univerjs-pro/engine-shape', '@univerjs-pro/engine-formula', /^@univerjs\//],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/shape-editor-ui', '@univerjs-pro/shape-editor-ui/locale/zh-CN', '@univerjs-pro/slides', '@univerjs-pro/slides/facade', '@univerjs-pro/slides-ui', '@univerjs-pro/slides-ui/locale/zh-CN', '@univerjs-pro/engine-shape', '@univerjs-pro/engine-shape/facade', '@univerjs-pro/engine-formula', /^@univerjs\//],
     plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/slides.js',

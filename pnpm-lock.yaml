@@ -11,6 +11,9 @@ importers:
       '@univerjs-pro/engine-formula':
         specifier: 1.0.0-beta.2
         version: 1.0.0-beta.2(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/engine-shape':
+        specifier: 1.0.0-beta.2
+        version: 1.0.0-beta.2(react@18.3.1)(rxjs@7.8.2)
       '@univerjs-pro/exchange-node':
         specifier: 1.0.0-beta.2
         version: 1.0.0-beta.2(react@18.3.1)(rxjs@7.8.2)
