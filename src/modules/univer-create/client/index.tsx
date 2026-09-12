@@ -420,8 +420,11 @@ function SavePathDialog({ extension, suggestedName, busy, onCancel, onSave }: Sa
 }
 
 async function loadUnitFilePath(sessionId: string, unitType: UniverUnitType): Promise<string | null> {
-  const result = await clientConnection.current?.rpc.call('/dsh-univer-create', 'file-path', { sessionId, unitType })
-  return result?.ok === true && typeof result.value === 'string' ? result.value : null
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'file-path', { sessionId, unitType })
+  if (!result.ok) throw new Error(result.error.message)
+  return typeof result.value === 'string' ? result.value : null
 }
 
 async function saveUnitFile(
@@ -689,8 +692,8 @@ function useConversationFeed(props: ConvViewProps): { nodes: readonly Conversati
 }
 
 const clientConnection: { current: ConnectionHandle | null } = { current: null }
-// Remember which sessions opened a workbook during this browser lifetime. This
-// distinguishes a first visit (welcome screen) from remounting after a tab switch.
+// Browser-lifetime markers control only the initial loading presentation.
+// Persisted Host state, not these markers, decides whether a unit exists.
 const openedWorkbookSessions = new Set<string>()
 
 function SheetProductView(props: ConvViewProps) {
@@ -716,10 +719,8 @@ function SheetProductView(props: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [sheetVisible, setSheetVisible] = useState(() => openedWorkbookSessions.has(sessionId))
-  // Always let the session initialization effect choose first-visit vs restore
-  // before Univer is allowed to mount. Starting as loaded lets the layout effect
-  // add the session marker first, so the passive effect misclassifies the same
-  // first mount as a restore and races its initial save.
+  // Always finish the Host lookup before mounting or replaying operations.
+  // A fresh browser may have persisted data despite having no in-memory marker.
   const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
@@ -782,37 +783,35 @@ function SheetProductView(props: ConvViewProps) {
     setSaveNotice('')
     hydratedFromHostRef.current = false
 
-    if (!openedWorkbookSessions.has(sessionId)) {
-      // A genuine first visit starts at the welcome screen.
-      setHostLoaded(true)
-      setSheetVisible(false)
-      return () => { cancelled = true }
-    }
-
-    // Returning from another tab restores the workbook instead of briefly
-    // showing the welcome actions and creating a new blank workbook.
+    // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setSheetVisible(true)
+    setSheetVisible(openedWorkbookSessions.has(sessionId))
     const restore = async () => {
+      const connection = clientConnection.current
+      if (connection === null) throw new Error('Host 连接不可用')
       const [result, restoredFilePath] = await Promise.all([
-        clientConnection.current?.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'sheet' }),
+        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'sheet' }),
         loadUnitFilePath(sessionId, 'sheet'),
       ])
       if (cancelled) return
+      if (!result.ok) throw new Error(result.error.message)
+      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
+        throw new Error('Host 返回了无效的表格快照')
+      }
       setFilePath(restoredFilePath)
-      if (result?.ok === true && result.value !== null && typeof result.value === 'object') {
+      if (result.value !== null) {
         setHostSnapshot(result.value)
       } else {
         openedWorkbookSessions.delete(sessionId)
         setSheetVisible(false)
       }
+      setError(null)
       setHostLoaded(true)
     }
     void restore().catch((reason) => {
       if (cancelled) return
-      openedWorkbookSessions.delete(sessionId)
-      setSheetVisible(false)
-      setHostLoaded(true)
+      // Fail closed: replaying from blank after a failed load could overwrite data.
+      setHostLoaded(false)
       setError(`无法恢复表格：${reason instanceof Error ? reason.message : String(reason)}`)
     })
     return () => { cancelled = true }
@@ -1170,7 +1169,7 @@ function SheetProductView(props: ConvViewProps) {
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
       {saveDialogOpen && <SavePathDialog extension="xlsx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsXlsx(path)} />}
-      {!sheetVisible && (
+      {hostLoaded && !sheetVisible && (
         <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Sheet">
           {actionButtons}
         </div>
@@ -1188,9 +1187,9 @@ function SheetProductView(props: ConvViewProps) {
               {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
             </div>
           </aside>
-          {error !== null && <div className="dsh-univer-create-error" role="alert">表格操作失败：{error}</div>}
         </>
       )}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">表格操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
     </section>
   )
 }
@@ -1252,34 +1251,35 @@ function DocProductView(props: ConvViewProps) {
     setSaveNotice('')
     hydratedFromHostRef.current = false
 
-    if (!openedDocumentSessions.has(sessionId)) {
-      setHostLoaded(true)
-      setDocumentVisible(false)
-      return () => { cancelled = true }
-    }
-
+    // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setDocumentVisible(true)
+    setDocumentVisible(openedDocumentSessions.has(sessionId))
     const restore = async () => {
+      const connection = clientConnection.current
+      if (connection === null) throw new Error('Host 连接不可用')
       const [result, restoredFilePath] = await Promise.all([
-        clientConnection.current?.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'doc' }),
+        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'doc' }),
         loadUnitFilePath(sessionId, 'doc'),
       ])
       if (cancelled) return
+      if (!result.ok) throw new Error(result.error.message)
+      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
+        throw new Error('Host 返回了无效的文档快照')
+      }
       setFilePath(restoredFilePath)
-      if (result?.ok === true && result.value !== null && typeof result.value === 'object') {
+      if (result.value !== null) {
         setHostSnapshot(result.value)
       } else {
         openedDocumentSessions.delete(sessionId)
         setDocumentVisible(false)
       }
+      setError(null)
       setHostLoaded(true)
     }
     void restore().catch((reason) => {
       if (cancelled) return
-      openedDocumentSessions.delete(sessionId)
-      setDocumentVisible(false)
-      setHostLoaded(true)
+      // Fail closed: replaying from blank after a failed load could overwrite data.
+      setHostLoaded(false)
       setError(`无法恢复文档：${reason instanceof Error ? reason.message : String(reason)}`)
     })
     return () => { cancelled = true }
@@ -1562,7 +1562,7 @@ function DocProductView(props: ConvViewProps) {
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
       {saveDialogOpen && <SavePathDialog extension="docx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsDocx(path)} />}
-      {!documentVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Doc">{actionButtons}</div>}
+      {hostLoaded && !documentVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Doc">{actionButtons}</div>}
       {documentVisible && (
         <>
           <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
@@ -1576,9 +1576,9 @@ function DocProductView(props: ConvViewProps) {
               {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
             </div>
           </aside>
-          {error !== null && <div className="dsh-univer-create-error" role="alert">文档操作失败：{error}</div>}
         </>
       )}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">文档操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
     </section>
   )
 }
@@ -1653,34 +1653,35 @@ function SlideProductView(props: ConvViewProps) {
     setSaveNotice('')
     hydratedFromHostRef.current = false
 
-    if (!openedPresentationSessions.has(sessionId)) {
-      setHostLoaded(true)
-      setPresentationVisible(false)
-      return () => { cancelled = true }
-    }
-
+    // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setPresentationVisible(true)
+    setPresentationVisible(openedPresentationSessions.has(sessionId))
     const restore = async () => {
+      const connection = clientConnection.current
+      if (connection === null) throw new Error('Host 连接不可用')
       const [result, restoredFilePath] = await Promise.all([
-        clientConnection.current?.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'slide' }),
+        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'slide' }),
         loadUnitFilePath(sessionId, 'slide'),
       ])
       if (cancelled) return
+      if (!result.ok) throw new Error(result.error.message)
+      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
+        throw new Error('Host 返回了无效的演示文稿快照')
+      }
       setFilePath(restoredFilePath)
-      if (result?.ok === true && result.value !== null && typeof result.value === 'object') {
+      if (result.value !== null) {
         setHostSnapshot(result.value as ISlideData)
       } else {
         openedPresentationSessions.delete(sessionId)
         setPresentationVisible(false)
       }
+      setError(null)
       setHostLoaded(true)
     }
     void restore().catch((reason) => {
       if (cancelled) return
-      openedPresentationSessions.delete(sessionId)
-      setPresentationVisible(false)
-      setHostLoaded(true)
+      // Fail closed: replaying from blank after a failed load could overwrite data.
+      setHostLoaded(false)
       setError(`无法恢复演示文稿：${reason instanceof Error ? reason.message : String(reason)}`)
     })
     return () => { cancelled = true }
@@ -2012,7 +2013,7 @@ function SlideProductView(props: ConvViewProps) {
       )}
       <div ref={containerRef} className="dsh-univer-create-container dsh-univer-create-container--slides" />
       {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
-      {!presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
+      {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
       {presentationVisible && (
         <>
           <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
@@ -2026,9 +2027,9 @@ function SlideProductView(props: ConvViewProps) {
               {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
             </div>
           </aside>
-          {error !== null && <div className="dsh-univer-create-error" role="alert">幻灯片操作失败：{error}</div>}
         </>
       )}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">幻灯片操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
     </section>
   )
 }
