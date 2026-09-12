@@ -9,10 +9,16 @@ import { z } from 'zod'
 export const name = 'dsh-univer-create'
 export const inject = ['tools', 'connection', 'storageDomain', 'workspaceRegistry']
 
+const queuedSheetOperationSchema = z.object({
+  id: z.string(),
+  operation: z.record(z.string(), z.unknown()),
+})
+
 const workbookRowSchema = z.object({
   snapshot: z.unknown(),
   updatedAt: z.number(),
   filePath: z.string().nullable().optional(),
+  queuedSheetOperations: z.array(queuedSheetOperationSchema).optional(),
 })
 const workbookDomainSpec = defineDomain({
   name: 'dsh_univer_sheet',
@@ -40,6 +46,23 @@ const output = {
 }
 
 type CellValue = string | number | boolean | null
+type QueuedSheetOperation = z.infer<typeof queuedSheetOperationSchema>
+
+type SheetAgent = {
+  id: string
+  session?: { header?: { parentSession?: string; origin?: string } }
+}
+
+function sheetOwnerSessionId(agent: SheetAgent | undefined): string | undefined {
+  if (agent === undefined) return undefined
+  return agent.session?.header?.origin === 'subagent' && typeof agent.session.header.parentSession === 'string'
+    ? agent.session.header.parentSession
+    : agent.id
+}
+
+function isSubagent(agent: SheetAgent | undefined): boolean {
+  return agent?.session?.header?.origin === 'subagent' && typeof agent.session.header.parentSession === 'string'
+}
 
 function columnIndex(label: string): number {
   let index = 0
@@ -222,6 +245,48 @@ async function saveExportedFile(root: string, filePath: string, unitType: keyof 
 export function apply(ctx: Context): void {
   const services = ctx as Context & { workspaceRegistry: WorkspaceRegistryLike }
   const domainPromise = ctx.storageDomain.open(workbookDomainSpec)
+  const workbookUpdateLocks = new Map<string, Promise<void>>()
+
+  const updateWorkbookRow = async (
+    storageKey: string,
+    update: (row: z.infer<typeof workbookRowSchema> | undefined) => z.infer<typeof workbookRowSchema>,
+  ): Promise<void> => {
+    const previous = workbookUpdateLocks.get(storageKey) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(async () => {
+      const table = (await domainPromise).table('workbooks')
+      await table.put(storageKey, update(table.get(storageKey)))
+    })
+    workbookUpdateLocks.set(storageKey, next)
+    try {
+      await next
+    } finally {
+      if (workbookUpdateLocks.get(storageKey) === next) workbookUpdateLocks.delete(storageKey)
+    }
+  }
+
+  const enqueueSubagentSheetOperation = async (
+    args: Record<string, unknown>,
+    exec: { agent?: SheetAgent; callId: unknown },
+    action: string,
+  ): Promise<void> => {
+    if (!isSubagent(exec.agent)) return
+    const ownerSessionId = sheetOwnerSessionId(exec.agent)
+    if (ownerSessionId === undefined) throw new Error('无法确定父会话，不能写入表格')
+    const queued: QueuedSheetOperation = {
+      id: `${exec.agent!.id}:${String(exec.callId)}`,
+      operation: { action, ...args },
+    }
+    await updateWorkbookRow(ownerSessionId, (row) => ({
+      snapshot: row?.snapshot ?? null,
+      updatedAt: Date.now(),
+      filePath: row?.filePath ?? null,
+      queuedSheetOperations: [
+        ...(row?.queuedSheetOperations ?? []).filter((item) => item.id !== queued.id),
+        queued,
+      ].slice(-2_000),
+    }))
+  }
+
   let disposed = false
   const close = async () => {
     disposed = true
@@ -273,6 +338,7 @@ export function apply(ctx: Context): void {
         snapshot?: unknown
         filePath?: unknown
         overwrite?: unknown
+        operationIds?: unknown
       }
       if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
         return { ok: false, error: { code: 'invalid-arguments', message: 'sessionId is required', details: {} } } as any
@@ -293,12 +359,35 @@ export function apply(ctx: Context): void {
       if (endpoint === 'file-path') {
         return { ok: true, value: table.get(storageKey)?.filePath ?? null }
       }
+      if (endpoint === 'sheet-operations') {
+        return { ok: true, value: table.get(request.sessionId)?.queuedSheetOperations ?? [] }
+      }
+      if (endpoint === 'ack-sheet-operations') {
+        if (!Array.isArray(request.operationIds) || !request.operationIds.every((id) => typeof id === 'string')) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'operationIds must be a string array', details: {} } } as any
+        }
+        const acknowledged = new Set(request.operationIds as string[])
+        await updateWorkbookRow(request.sessionId, (row) => ({
+          snapshot: row?.snapshot ?? null,
+          updatedAt: Date.now(),
+          filePath: row?.filePath ?? null,
+          queuedSheetOperations: (row?.queuedSheetOperations ?? []).filter((item) => !acknowledged.has(item.id)),
+        }))
+        return { ok: true, value: { acknowledged: acknowledged.size } }
+      }
       if (endpoint === 'save' && request.snapshot !== undefined) {
-        const previous = table.get(storageKey)
-        const nextFilePath = request.filePath === null
-          ? null
-          : typeof request.filePath === 'string' ? request.filePath : previous?.filePath
-        await table.put(storageKey, { snapshot: request.snapshot, updatedAt: Date.now(), filePath: nextFilePath })
+        let nextFilePath: string | null | undefined
+        await updateWorkbookRow(storageKey, (previous) => {
+          nextFilePath = request.filePath === null
+            ? null
+            : typeof request.filePath === 'string' ? request.filePath : previous?.filePath
+          return {
+            snapshot: request.snapshot,
+            updatedAt: Date.now(),
+            filePath: nextFilePath,
+            queuedSheetOperations: previous?.queuedSheetOperations,
+          }
+        })
         return { ok: true, value: { saved: true, filePath: nextFilePath ?? null } }
       }
       if (endpoint === 'export' && request.snapshot !== undefined) {
@@ -311,12 +400,12 @@ export function apply(ctx: Context): void {
         const root = services.workspaceRegistry.host.sessionPath(request.sessionId)
         if (typeof root !== 'string' || root.length === 0) throw new Error('无法解析当前 session workspace 目录')
         const saved = await saveExportedFile(root, request.filePath, request.unitType, request.snapshot, request.overwrite === true)
-        const previous = table.get(storageKey)
-        await table.put(storageKey, {
+        await updateWorkbookRow(storageKey, (previous) => ({
           snapshot: request.snapshot,
           updatedAt: Date.now(),
           filePath: saved.path,
-        })
+          queuedSheetOperations: previous?.queuedSheetOperations,
+        }))
         return { ok: true, value: saved }
       }
       return { ok: false, error: { code: 'not-found', message: `unknown endpoint: ${endpoint}`, details: {} } } as any
@@ -359,7 +448,8 @@ export function apply(ctx: Context): void {
       columns: { type: 'integer', description: 'Initial column count. Defaults to 26.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'new')
       return {
         ok: true,
         action: 'new',
@@ -377,7 +467,8 @@ export function apply(ctx: Context): void {
       columns: { type: 'integer', description: 'Initial column count. Defaults to 26.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'add-sheet')
       return { ok: true, action: 'add-sheet', message: `已添加工作表“${args.name}”。` }
     },
   }))
@@ -389,7 +480,8 @@ export function apply(ctx: Context): void {
       name: { type: 'string', required: true, description: 'Worksheet name to delete.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'delete-sheet')
       return { ok: true, action: 'delete-sheet', message: `已删除工作表“${args.name}”。` }
     },
   }))
@@ -402,7 +494,8 @@ export function apply(ctx: Context): void {
       newName: { type: 'string', required: true, description: 'New worksheet name.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'rename-sheet')
       return { ok: true, action: 'rename-sheet', message: `已将工作表“${args.oldName}”重命名为“${args.newName}”。` }
     },
   }))
@@ -475,7 +568,7 @@ export function apply(ctx: Context): void {
       ],
     },
     async execute(args, exec) {
-      const sessionId = exec.agent?.id
+      const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能读取表格')
       const stored = (await domainPromise).table('workbooks').get(sessionId)
       const result = readSnapshotRange(stored?.snapshot, args.range, args.sheetName)
@@ -514,7 +607,8 @@ export function apply(ctx: Context): void {
       sheetName: { type: 'string', description: 'Target worksheet name. Defaults to the active sheet.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'set-range')
       return { ok: true, action: 'set-range', message: `已写入 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range}。` }
     },
   }))
@@ -527,7 +621,8 @@ export function apply(ctx: Context): void {
       sheetName: { type: 'string', description: 'Target worksheet name. Defaults to the active sheet.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'clear-range')
       return { ok: true, action: 'clear-range', message: `已清空 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range}。` }
     },
   }))
@@ -544,7 +639,8 @@ export function apply(ctx: Context): void {
       fontSize: { type: 'number', description: 'Font size in points.' },
     },
     output,
-    async execute(args) {
+    async execute(args, exec) {
+      await enqueueSubagentSheetOperation(args, exec, 'format-range')
       return { ok: true, action: 'format-range', message: `已设置 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range} 的格式。` }
     },
   }))

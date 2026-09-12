@@ -20,6 +20,7 @@ import { UniverUIPlugin } from '@univerjs/ui'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
 import DesignZhCN from '@univerjs/design/locale/zh-CN'
 import { UniverLicensePlugin } from '@univerjs-pro/license'
+import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { getSlidesEmptySnapshot, PageElementTypeEnum, UniverSlidesPlugin } from '@univerjs-pro/slides'
 import type { ISlideData, ISlideTextElement } from '@univerjs-pro/slides'
@@ -40,16 +41,18 @@ import './styles.css'
 
 type JsonScalar = string | number | boolean | null
 
+type SheetOperationId = number | string
+
 type SheetOperation =
-  | { seq: number; action: 'new'; title?: string; sheetName?: string; rows?: number; columns?: number }
-  | { seq: number; action: 'add-sheet'; name: string; rows?: number; columns?: number }
-  | { seq: number; action: 'delete-sheet'; name: string }
-  | { seq: number; action: 'rename-sheet'; oldName: string; newName: string }
-  | { seq: number; action: 'list-sheets' }
-  | { seq: number; action: 'set-range'; range: string; values: JsonScalar[][]; sheetName?: string }
-  | { seq: number; action: 'clear-range'; range: string; sheetName?: string }
+  | { seq: SheetOperationId; action: 'new'; title?: string; sheetName?: string; rows?: number; columns?: number }
+  | { seq: SheetOperationId; action: 'add-sheet'; name: string; rows?: number; columns?: number }
+  | { seq: SheetOperationId; action: 'delete-sheet'; name: string }
+  | { seq: SheetOperationId; action: 'rename-sheet'; oldName: string; newName: string }
+  | { seq: SheetOperationId; action: 'list-sheets' }
+  | { seq: SheetOperationId; action: 'set-range'; range: string; values: JsonScalar[][]; sheetName?: string }
+  | { seq: SheetOperationId; action: 'clear-range'; range: string; sheetName?: string }
   | {
-      seq: number
+      seq: SheetOperationId
       action: 'format-range'
       range: string
       sheetName?: string
@@ -129,22 +132,11 @@ const SHEET_TOOL_NAMES = new Set([
   'univer_sheet_format_range',
 ])
 
-function operationFromNode(node: ConversationNode): SheetOperation | null {
-  if (node.kind !== 'tool-result' || node.isError || node.call === null || !SHEET_TOOL_NAMES.has(node.call.name)) return null
-
-  let args: Record<string, unknown>
-  try {
-    const parsed = JSON.parse(node.call.argsRaw)
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-    args = parsed as Record<string, unknown>
-  } catch {
-    return null
-  }
-
+function sheetOperationFromArgs(name: string, args: Record<string, unknown>, seq: SheetOperationId): SheetOperation | null {
   const sheetName = typeof args.sheetName === 'string' ? args.sheetName : undefined
-  if (node.call.name === 'univer_sheet_new') {
+  if (name === 'univer_sheet_new' || name === 'new') {
     return {
-      seq: node.seq,
+      seq,
       action: 'new',
       title: typeof args.title === 'string' ? args.title : undefined,
       sheetName,
@@ -152,38 +144,36 @@ function operationFromNode(node: ConversationNode): SheetOperation | null {
       columns: typeof args.columns === 'number' ? args.columns : undefined,
     }
   }
-
-  if (node.call.name === 'univer_sheet_add') {
+  if (name === 'univer_sheet_add' || name === 'add-sheet') {
     if (typeof args.name !== 'string') return null
     return {
-      seq: node.seq,
+      seq,
       action: 'add-sheet',
       name: args.name,
       rows: typeof args.rows === 'number' ? args.rows : undefined,
       columns: typeof args.columns === 'number' ? args.columns : undefined,
     }
   }
-  if (node.call.name === 'univer_sheet_delete') {
-    return typeof args.name === 'string' ? { seq: node.seq, action: 'delete-sheet', name: args.name } : null
+  if (name === 'univer_sheet_delete' || name === 'delete-sheet') {
+    return typeof args.name === 'string' ? { seq, action: 'delete-sheet', name: args.name } : null
   }
-  if (node.call.name === 'univer_sheet_rename') {
+  if (name === 'univer_sheet_rename' || name === 'rename-sheet') {
     return typeof args.oldName === 'string' && typeof args.newName === 'string'
-      ? { seq: node.seq, action: 'rename-sheet', oldName: args.oldName, newName: args.newName }
+      ? { seq, action: 'rename-sheet', oldName: args.oldName, newName: args.newName }
       : null
   }
-  if (node.call.name === 'univer_sheet_list') {
-    return { seq: node.seq, action: 'list-sheets' }
-  }
+  if (name === 'univer_sheet_list' || name === 'list-sheets') return { seq, action: 'list-sheets' }
   if (typeof args.range !== 'string') return null
-  if (node.call.name === 'univer_sheet_set_range') {
+  if (name === 'univer_sheet_set_range' || name === 'set-range') {
     if (!Array.isArray(args.values)) return null
-    return { seq: node.seq, action: 'set-range', range: args.range, values: args.values as JsonScalar[][], sheetName }
+    return { seq, action: 'set-range', range: args.range, values: args.values as JsonScalar[][], sheetName }
   }
-  if (node.call.name === 'univer_sheet_clear_range') {
-    return { seq: node.seq, action: 'clear-range', range: args.range, sheetName }
+  if (name === 'univer_sheet_clear_range' || name === 'clear-range') {
+    return { seq, action: 'clear-range', range: args.range, sheetName }
   }
+  if (name !== 'univer_sheet_format_range' && name !== 'format-range') return null
   return {
-    seq: node.seq,
+    seq,
     action: 'format-range',
     range: args.range,
     sheetName,
@@ -192,6 +182,30 @@ function operationFromNode(node: ConversationNode): SheetOperation | null {
     bold: typeof args.bold === 'boolean' ? args.bold : undefined,
     fontSize: typeof args.fontSize === 'number' ? args.fontSize : undefined,
   }
+}
+
+function operationFromNode(node: ConversationNode): SheetOperation | null {
+  if (node.kind !== 'tool-result' || node.isError || node.call === null || !SHEET_TOOL_NAMES.has(node.call.name)) return null
+  try {
+    const parsed = JSON.parse(node.call.argsRaw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return sheetOperationFromArgs(node.call.name, parsed as Record<string, unknown>, node.seq)
+  } catch {
+    return null
+  }
+}
+
+interface QueuedSheetOperation {
+  id: string
+  operation: Record<string, unknown>
+}
+
+function parseQueuedSheetOperation(value: unknown): SheetOperation | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const queued = value as Partial<QueuedSheetOperation>
+  if (typeof queued.id !== 'string' || queued.operation === null || typeof queued.operation !== 'object' || Array.isArray(queued.operation)) return null
+  const action = queued.operation.action
+  return typeof action === 'string' ? sheetOperationFromArgs(action, queued.operation, queued.id) : null
 }
 
 const DOC_TOOL_NAMES = new Set([
@@ -682,7 +696,9 @@ const openedWorkbookSessions = new Set<string>()
 function SheetProductView(props: ConvViewProps) {
   const { sessionId } = props
   const { nodes, partialText } = useConversationFeed(props)
-  const operations = useMemo(() => nodes.map(operationFromNode).filter((item): item is SheetOperation => item !== null), [nodes])
+  const conversationOperations = useMemo(() => nodes.map(operationFromNode).filter((item): item is SheetOperation => item !== null), [nodes])
+  const [queuedOperations, setQueuedOperations] = useState<SheetOperation[]>([])
+  const operations = useMemo(() => [...conversationOperations, ...queuedOperations], [conversationOperations, queuedOperations])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
@@ -690,7 +706,7 @@ function SheetProductView(props: ConvViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(null)
-  const appliedRef = useRef(new Set<number>())
+  const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话表格')
   const [error, setError] = useState<string | null>(null)
@@ -710,6 +726,7 @@ function SheetProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  const queuedPersistingRef = useRef(false)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
   useLayoutEffect(() => {
@@ -724,6 +741,33 @@ function SheetProductView(props: ConvViewProps) {
     const stream = chatStreamRef.current
     if (stream !== null) stream.scrollTop = stream.scrollHeight
   }, [chatLines, partialText])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadQueuedOperations = async () => {
+      const connection = clientConnection.current
+      const container = containerRef.current
+      // Conversation views can remain mounted while another tab or a Workspace
+      // preview is active. Do not keep polling the Host from that hidden view.
+      if (
+        connection === null
+        || document.visibilityState !== 'visible'
+        || container === null
+        || container.getClientRects().length === 0
+      ) return
+      const result = await connection.rpc.call('/dsh-univer-create', 'sheet-operations', { sessionId, unitType: 'sheet' })
+      if (cancelled || !result.ok || !Array.isArray(result.value)) return
+      const parsed = result.value.map(parseQueuedSheetOperation).filter((item): item is SheetOperation => item !== null)
+      setQueuedOperations(parsed)
+    }
+    void loadQueuedOperations().catch(() => {})
+    const timer = window.setInterval(() => void loadQueuedOperations().catch(() => {}), 500)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      setQueuedOperations([])
+    }
+  }, [sessionId])
 
   useEffect(() => {
     let cancelled = false
@@ -801,6 +845,7 @@ function SheetProductView(props: ConvViewProps) {
         },
         theme: defaultTheme,
         presets: [UniverSheetsCorePreset({ container: mount })],
+        plugins: [[UniverLicensePlugin, { license: UNIVER_LICENSE }]],
       })
       runtime.univerAPI.createWorkbook(normalizeWorkbookSnapshot(snapshot ?? workbookData(operation)))
       runtimeRef.current = Object.assign(runtime, { mount })
@@ -821,7 +866,9 @@ function SheetProductView(props: ConvViewProps) {
       if (runtimeRef.current === null) {
         createRuntime(undefined, hostSnapshot ?? undefined)
         if (hostSnapshot !== null && !hydratedFromHostRef.current) {
-          for (const operation of operations) appliedRef.current.add(operation.seq)
+          // The persisted snapshot already contains main-conversation operations,
+          // but queued subagent operations still need to be applied and acknowledged.
+          for (const operation of conversationOperations) appliedRef.current.add(operation.seq)
           hydratedFromHostRef.current = true
           lastSavedRef.current = JSON.stringify(hostSnapshot)
         }
@@ -905,13 +952,43 @@ function SheetProductView(props: ConvViewProps) {
         }
         appliedRef.current.add(operation.seq)
       }
+
+      const queuedIds = queuedOperations
+        .map((operation) => operation.seq)
+        .filter((id): id is string => typeof id === 'string' && appliedRef.current.has(id))
+      if (queuedIds.length > 0 && !queuedPersistingRef.current) {
+        queuedPersistingRef.current = true
+        void (async () => {
+          await pendingSaveRef.current
+          const connection = clientConnection.current
+          const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+          if (connection === null || workbook === null || workbook === undefined) return
+          const snapshot = normalizeWorkbookSnapshot(workbook.save())
+          const serialized = JSON.stringify(snapshot)
+          const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot })
+          if (!saved.ok) throw new Error(saved.error.message)
+          const acknowledged = await connection.rpc.call('/dsh-univer-create', 'ack-sheet-operations', {
+            sessionId,
+            unitType: 'sheet',
+            operationIds: queuedIds,
+          })
+          if (!acknowledged.ok) throw new Error(acknowledged.error.message)
+          lastSavedRef.current = serialized
+          const acknowledgedIds = new Set(queuedIds)
+          setQueuedOperations((current) => current.filter((operation) => !acknowledgedIds.has(String(operation.seq))))
+        })().catch((reason) => {
+          setError(`保存子代理表格操作失败：${reason instanceof Error ? reason.message : String(reason)}`)
+        }).finally(() => {
+          queuedPersistingRef.current = false
+        })
+      }
       setError(null)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
 
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion])
+  }, [hostLoaded, hostSnapshot, operations, conversationOperations, queuedOperations, layoutVersion, sessionId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1233,6 +1310,7 @@ function DocProductView(props: ConvViewProps) {
           UniverDocsCorePreset({ container: mount }),
           UniverDocsDrawingPreset(),
         ],
+        plugins: [[UniverLicensePlugin, { license: UNIVER_LICENSE }]],
       })
       const fDocument = runtime.univerAPI.createDocument((restoredSnapshot ?? documentData(operation)) as any)
       if (restoredSnapshot === undefined && operation?.text) fDocument.insertText(0, operation.text)
@@ -1637,7 +1715,7 @@ function SlideProductView(props: ConvViewProps) {
       univer.registerPlugin(UniverDocsPlugin)
       univer.registerPlugin(UniverDocsUIPlugin)
       univer.registerPlugin(UniverDrawingPlugin)
-      univer.registerPlugin(UniverLicensePlugin)
+      univer.registerPlugin(UniverLicensePlugin, { license: UNIVER_LICENSE })
       univer.registerPlugin(UniverSlidesPlugin)
       univer.registerPlugin(UniverSlidesUIPlugin)
 

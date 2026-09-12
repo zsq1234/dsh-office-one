@@ -1,4 +1,6 @@
+import { UniverLicensePlugin } from '@univerjs-pro/license'
 import { createUniver, defaultTheme, LocaleType, mergeLocales } from '@univerjs/presets'
+import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import { UniverDocsCorePreset } from '@univerjs/preset-docs-core'
 import UniverPresetDocsCoreZhCN from '@univerjs/preset-docs-core/locales/zh-CN'
 import { UniverDocsDrawingPreset } from '@univerjs/preset-docs-drawing'
@@ -12,6 +14,7 @@ export function createDocsRuntime(container: HTMLElement) {
     locales: { [LocaleType.ZH_CN]: mergeLocales(UniverPresetDocsCoreZhCN, UniverPresetDocsDrawingZhCN) },
     theme: defaultTheme,
     presets: [UniverDocsCorePreset({ container, disableAutoFocus: true }), UniverDocsDrawingPreset()],
+    plugins: [[UniverLicensePlugin, { license: UNIVER_LICENSE }]],
   })
 }
 
