@@ -42,7 +42,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "bundle": "tsdown --config tsdown.config.ts",
-    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs && node --test tests/client-bundle.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs && node --test tests/*.test.mjs",
     "build": "pnpm typecheck && pnpm bundle && pnpm check",
     "watch": "tsdown --config tsdown.config.ts --watch",
     "clean": "rm -rf lib",

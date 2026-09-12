@@ -42,6 +42,15 @@ pnpm build
 - `lib/runtimes/*.js`：Workspace Office 预览按需加载的 Univer runtime。
 - `server/export-file.mjs`：Office 文件转换子进程。
 
+## 会话文档持久化
+
+Univer Tab 中的 Sheet、Doc、Slide 快照通过 DSH 的 `storageDomain` 保存，不依赖浏览器内存。默认 JSON 后端的存档位于 `$DSH_HOME/storages/dsh_univer_sheet.json`（通常为 `~/.dsh/storages/dsh_univer_sheet.json`）；使用自定义存储路由时以 DSH 配置为准。
+
+- 每次打开会话的产品视图，都会先读取服务端快照；只有读取成功且没有存档时才进入新建流程。
+- 服务暂时不可用或恢复失败时，不应把它当作空文档，也不会自动重放历史操作覆盖存档；待服务恢复后刷新页面重试。
+- 编辑器约每 800 ms 自动保存快照，关闭页面或强制结束服务前的最后一小段未保存编辑仍可能丢失。需要独立文件时，请另存为 `.xlsx`、`.docx` 或 `.pptx`。
+- 重启时应使用同一个 `DSH_HOME` 和存储配置。遇到文档不显示，先备份上述存档，再排查；不要立即新建同一会话文档，以免覆盖仍在磁盘上的快照。
+
 ## 单包安装
 
 ```bash
