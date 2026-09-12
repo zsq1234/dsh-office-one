@@ -25,6 +25,7 @@ import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { getSlidesEmptySnapshot, PageElementTypeEnum, UniverSlidesPlugin } from '@univerjs-pro/slides'
 import type { ISlideData, ISlideTextElement } from '@univerjs-pro/slides'
 import type { FPresentation } from '@univerjs-pro/slides/facade'
+import { ShapeFillEnum, ShapeLineTypeEnum, ShapeTypeEnum } from '@univerjs-pro/engine-shape'
 import '@univerjs-pro/slides/facade'
 import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
 import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
@@ -113,6 +114,21 @@ type SlideOperation =
       bold?: boolean
     }
   | { seq: number; action: 'delete-slide-element'; slideIndex: number; elementId: string }
+  | {
+      seq: number
+      action: 'add-slide-shape'
+      slideIndex: number
+      shapeType: string
+      left?: number
+      top?: number
+      width?: number
+      height?: number
+      fillColor?: string
+      strokeColor?: string
+      strokeWidth?: number
+      opacity?: number
+      selectable?: boolean
+    }
 
 type UniverUnitType = 'sheet' | 'doc' | 'slide'
 type UniverRuntime = ReturnType<typeof createUniver>
@@ -200,6 +216,12 @@ interface QueuedSheetOperation {
   operation: Record<string, unknown>
 }
 
+interface SlideScreenshotRequest {
+  id: string
+  slideIndex: number
+  mode: 'slide' | 'editor'
+}
+
 function parseQueuedSheetOperation(value: unknown): SheetOperation | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const queued = value as Partial<QueuedSheetOperation>
@@ -274,6 +296,7 @@ const SLIDE_TOOL_NAMES = new Set([
   'univer_slide_add',
   'univer_slide_delete',
   'univer_slide_add_text',
+  'univer_slide_add_shape',
   'univer_slide_update_text',
   'univer_slide_delete_element',
 ])
@@ -332,6 +355,24 @@ function slideOperationFromNode(node: ConversationNode): SlideOperation | null {
       fontSize: numberArg('fontSize'),
       fontColor: typeof args.fontColor === 'string' ? args.fontColor : undefined,
       bold: typeof args.bold === 'boolean' ? args.bold : undefined,
+    }
+  }
+  if (node.call.name === 'univer_slide_add_shape') {
+    if (typeof args.shapeType !== 'string') return null
+    return {
+      seq: node.seq,
+      action: 'add-slide-shape',
+      slideIndex: args.slideIndex,
+      shapeType: args.shapeType,
+      left: numberArg('left'),
+      top: numberArg('top'),
+      width: numberArg('width'),
+      height: numberArg('height'),
+      fillColor: typeof args.fillColor === 'string' ? args.fillColor : undefined,
+      strokeColor: typeof args.strokeColor === 'string' ? args.strokeColor : undefined,
+      strokeWidth: numberArg('strokeWidth'),
+      opacity: numberArg('opacity'),
+      selectable: typeof args.selectable === 'boolean' ? args.selectable : undefined,
     }
   }
   if (typeof args.elementId !== 'string') return null
@@ -628,6 +669,32 @@ function presentationData(operation?: Extract<SlideOperation, { action: 'new-sli
     width: Math.max(1, operation?.width ?? 960),
     height: Math.max(1, operation?.height ?? 540),
   }
+  // The Univer empty snapshot defaults to the title-and-body layout. That layout
+  // renders untranslated placeholder keys and overlaps AI-positioned text. AI
+  // slide tools use absolute model coordinates, so start them from a truly blank
+  // layout while leaving imported presentations unchanged.
+  const firstSlideId = data.slideOrder[0]
+  if (firstSlideId !== undefined && data.slides[firstSlideId] !== undefined) {
+    data.slides[firstSlideId].layoutPageId = 'layout-blank'
+    data.slides[firstSlideId].showMasterSp = false
+  }
+  return data
+}
+
+function normalizeAiSlideLayouts(data: ISlideData): ISlideData {
+  for (const slideId of data.slideOrder) {
+    const slide = data.slides[slideId]
+    if (slide === undefined) continue
+    const elementIds = Object.keys(slide.elements ?? {})
+    for (const elementId of elementIds) {
+      const element = slide.elements[elementId]
+      if (element !== undefined && (elementId.startsWith('slide-text-') || element.name === 'text')) element.selectable = true
+    }
+    if (elementIds.some((id) => id.startsWith('slide-text-')) && !elementIds.some((id) => id.startsWith('ph-'))) {
+      slide.layoutPageId = 'layout-blank'
+      slide.showMasterSp = false
+    }
+  }
   return data
 }
 
@@ -719,6 +786,7 @@ function SheetProductView(props: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [sheetVisible, setSheetVisible] = useState(() => openedWorkbookSessions.has(sessionId))
+  const [chatOverlayVisible, setChatOverlayVisible] = useState(true)
   // Always finish the Host lookup before mounting or replaying operations.
   // A fresh browser may have persisted data despite having no in-memory marker.
   const [hostLoaded, setHostLoaded] = useState(false)
@@ -755,6 +823,7 @@ function SheetProductView(props: ConvViewProps) {
         || document.visibilityState !== 'visible'
         || container === null
         || container.getClientRects().length === 0
+        || getComputedStyle(container).visibility === 'hidden'
       ) return
       const result = await connection.rpc.call('/dsh-univer-create', 'sheet-operations', { sessionId, unitType: 'sheet' })
       if (cancelled || !result.ok || !Array.isArray(result.value)) return
@@ -1177,8 +1246,19 @@ function SheetProductView(props: ConvViewProps) {
       {sheetVisible && (
         <>
           <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
-            <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
-            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream">
+            <div className="dsh-univer-create-chat-overlay__header">
+              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <button
+                className="dsh-univer-create-chat-overlay__toggle"
+                type="button"
+                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-expanded={chatOverlayVisible}
+                onClick={() => setChatOverlayVisible((visible) => !visible)}
+              >
+                {chatOverlayVisible ? '隐藏' : '显示'}
+              </button>
+            </div>
+            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
               {chatLines.map((line, index) => (
                 <div className="dsh-univer-create-chat-overlay__line" key={`${line.role}-${index}-${line.text.slice(0, 16)}`}>
                   <strong>{line.role}</strong><span>{line.text}</span>
@@ -1217,6 +1297,7 @@ function DocProductView(props: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [documentVisible, setDocumentVisible] = useState(() => openedDocumentSessions.has(sessionId))
+  const [chatOverlayVisible, setChatOverlayVisible] = useState(true)
   const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
@@ -1566,8 +1647,19 @@ function DocProductView(props: ConvViewProps) {
       {documentVisible && (
         <>
           <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
-            <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
-            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream">
+            <div className="dsh-univer-create-chat-overlay__header">
+              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <button
+                className="dsh-univer-create-chat-overlay__toggle"
+                type="button"
+                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-expanded={chatOverlayVisible}
+                onClick={() => setChatOverlayVisible((visible) => !visible)}
+              >
+                {chatOverlayVisible ? '隐藏' : '显示'}
+              </button>
+            </div>
+            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
               {chatLines.map((line, index) => (
                 <div className="dsh-univer-create-chat-overlay__line" key={`${line.role}-${index}-${line.text.slice(0, 16)}`}>
                   <strong>{line.role}</strong><span>{line.text}</span>
@@ -1584,6 +1676,90 @@ function DocProductView(props: ConvViewProps) {
 }
 
 const openedPresentationSessions = new Set<string>()
+
+function waitForAnimationFrames(count = 2): Promise<void> {
+  return new Promise((resolve) => {
+    const next = (remaining: number) => {
+      if (remaining <= 0) resolve()
+      else window.requestAnimationFrame(() => next(remaining - 1))
+    }
+    next(count)
+  })
+}
+
+async function captureRenderedSlide(
+  runtime: MountedSlideRuntime,
+  slideIndex: number,
+  mode: 'slide' | 'editor',
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  const slide = runtime.presentation.getSlideByIndex(slideIndex)
+  if (slide === null) throw new Error(`找不到第 ${slideIndex + 1} 张幻灯片`)
+  runtime.presentation.setActiveSlide(slide)
+  window.dispatchEvent(new Event('resize'))
+  if (document.fonts?.ready !== undefined) await document.fonts.ready
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
+  await waitForAnimationFrames(3)
+
+  const pageSize = slide.getPageSize()
+  const pageAspect = pageSize.width / pageSize.height
+  const candidates = [...runtime.mount.querySelectorAll('canvas')].map((canvas) => ({
+    canvas,
+    rect: canvas.getBoundingClientRect(),
+  })).filter(({ canvas, rect }) => canvas.width >= 200 && canvas.height >= 100 && rect.width >= 240 && rect.height >= 120)
+  if (candidates.length === 0) throw new Error('没有找到已渲染的幻灯片画布')
+
+  const primary = candidates.sort((left, right) => {
+    const score = ({ rect }: typeof left) => rect.width * rect.height / (1 + Math.abs(Math.log((rect.width / rect.height) / pageAspect)) * 6)
+    return score(right) - score(left)
+  })[0]!
+  const layers = candidates.filter(({ rect }) => (
+    Math.abs(rect.left - primary.rect.left) <= 2
+    && Math.abs(rect.top - primary.rect.top) <= 2
+    && Math.abs(rect.width - primary.rect.width) <= 2
+    && Math.abs(rect.height - primary.rect.height) <= 2
+  ))
+
+  let cropLeft = 0
+  let cropTop = 0
+  let cropWidth = primary.rect.width
+  let cropHeight = primary.rect.height
+  if (mode === 'slide') {
+    const currentAspect = cropWidth / cropHeight
+    if (currentAspect > pageAspect) {
+      cropWidth = cropHeight * pageAspect
+      cropLeft = (primary.rect.width - cropWidth) / 2
+    } else if (currentAspect < pageAspect) {
+      cropHeight = cropWidth / pageAspect
+      cropTop = (primary.rect.height - cropHeight) / 2
+    }
+  }
+
+  const outputWidth = Math.max(1, Math.min(1600, Math.round(cropWidth * Math.min(window.devicePixelRatio || 1, 2))))
+  const outputHeight = Math.max(1, Math.round(outputWidth * cropHeight / cropWidth))
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = outputWidth
+  outputCanvas.height = outputHeight
+  const context = outputCanvas.getContext('2d')
+  if (context === null) throw new Error('浏览器无法创建截图画布')
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, outputWidth, outputHeight)
+  for (const { canvas, rect } of layers) {
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    context.drawImage(
+      canvas,
+      cropLeft * scaleX,
+      cropTop * scaleY,
+      cropWidth * scaleX,
+      cropHeight * scaleY,
+      0,
+      0,
+      outputWidth,
+      outputHeight,
+    )
+  }
+  return { dataUrl: outputCanvas.toDataURL('image/png'), width: outputWidth, height: outputHeight }
+}
 
 function SlideProductView(props: ConvViewProps) {
   const { sessionId } = props
@@ -1606,12 +1782,14 @@ function SlideProductView(props: ConvViewProps) {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [presentationVisible, setPresentationVisible] = useState(() => openedPresentationSessions.has(sessionId))
+  const [chatOverlayVisible, setChatOverlayVisible] = useState(true)
   const [hostLoaded, setHostLoaded] = useState(false)
   const [hostSnapshot, setHostSnapshot] = useState<ISlideData | null>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  const screenshotInFlightRef = useRef(new Set<string>())
   const slideResizeTimersRef = useRef<number[]>([])
   const [layoutVersion, setLayoutVersion] = useState(0)
 
@@ -1721,7 +1899,7 @@ function SlideProductView(props: ConvViewProps) {
       univer.registerPlugin(UniverSlidesUIPlugin)
 
       const univerAPI = FUniver.newAPI(univer)
-      const presentation = univerAPI.createPresentation(restoredSnapshot ?? presentationData(operation))
+      const presentation = univerAPI.createPresentation(normalizeAiSlideLayouts(restoredSnapshot ?? presentationData(operation)))
       runtimeRef.current = { univer, univerAPI, mount, presentation }
       openedPresentationSessions.add(sessionId)
       setPresentationVisible(true)
@@ -1753,6 +1931,7 @@ function SlideProductView(props: ConvViewProps) {
         }
       }
 
+      let appliedNewOperation = false
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
         if (operation.action === 'new-slide') {
@@ -1763,6 +1942,7 @@ function SlideProductView(props: ConvViewProps) {
           void clientConnection.current?.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot: blankSnapshot, filePath: null })
           appliedRef.current.clear()
           appliedRef.current.add(operation.seq)
+          appliedNewOperation = true
           continue
         }
         if (operation.action === 'list-slides') {
@@ -1777,7 +1957,12 @@ function SlideProductView(props: ConvViewProps) {
           const slides = presentation.getSlides()
           const index = operation.index ?? slides.length
           if (!Number.isInteger(index) || index < 0 || index > slides.length) throw new Error(`无效的插入位置：${index}`)
-          const options = { id: `slide-page-${operation.seq}`, name: operation.title ?? `幻灯片 ${index + 1}` }
+          const options = {
+            id: `slide-page-${operation.seq}`,
+            name: operation.title ?? `幻灯片 ${index + 1}`,
+            layoutPageId: 'layout-blank',
+            showMasterSp: false,
+          }
           if (index === slides.length) presentation.appendSlide(options)
           else presentation.insertSlide(index, options)
         } else if (operation.action === 'delete-slide') {
@@ -1794,9 +1979,9 @@ function SlideProductView(props: ConvViewProps) {
             if (element === null) throw new Error(`找不到幻灯片元素：${operation.elementId}`)
             if (!slide.deleteElement(element)) throw new Error(`无法删除幻灯片元素：${operation.elementId}`)
           } else if (operation.action === 'add-slide-text') {
-            const element: ISlideTextElement = {
+            const element = {
               id: `slide-text-${operation.seq}`,
-              type: PageElementTypeEnum.Text,
+              type: PageElementTypeEnum.Shape,
               transform: {
                 left: operation.left ?? 120,
                 top: operation.top ?? 100,
@@ -1806,38 +1991,98 @@ function SlideProductView(props: ConvViewProps) {
               name: 'text',
               visible: true,
               selectable: true,
-              text: operation.text,
-              textStyle: {
-                fontSize: operation.fontSize ?? 30,
-                color: operation.fontColor ?? '#333333',
-                bold: operation.bold ?? true,
+              shapeData: {
+                shapeType: ShapeTypeEnum.Rect,
+                isTextBox: true,
+                fill: { fillType: ShapeFillEnum.NoFill },
+                stroke: { lineStrokeType: ShapeLineTypeEnum.NoLine },
+                shapeText: {
+                  isRichText: false,
+                  text: operation.text,
+                  fontSize: operation.fontSize ?? 30,
+                  color: operation.fontColor ?? '#333333',
+                  bold: operation.bold ?? true,
+                },
               },
             }
-            slide.insertElement(element)
+            slide.insertElement(element as any)
+          } else if (operation.action === 'add-slide-shape') {
+            const shapeType = (Object.values(ShapeTypeEnum) as string[]).includes(operation.shapeType)
+              ? operation.shapeType as ShapeTypeEnum
+              : ShapeTypeEnum.Rect
+            const fillColor = operation.fillColor ?? '#4472C4'
+            const strokeColor = operation.strokeColor ?? '#44546A'
+            slide.insertShape({
+              shapeType,
+              transform: {
+                left: operation.left ?? 120,
+                top: operation.top ?? 120,
+                width: Math.max(1, operation.width ?? 240),
+                height: Math.max(1, operation.height ?? 120),
+              },
+              visible: true,
+              selectable: operation.selectable ?? true,
+              shapeData: {
+                shapeType,
+                fill: {
+                  fillType: operation.fillColor === 'transparent' ? ShapeFillEnum.NoFill : ShapeFillEnum.SolidFill,
+                  color: fillColor,
+                  opacity: operation.opacity ?? 1,
+                },
+                stroke: {
+                  lineStrokeType: operation.strokeColor === 'none' ? ShapeLineTypeEnum.NoLine : ShapeLineTypeEnum.SolidLine,
+                  color: strokeColor,
+                  width: operation.strokeWidth ?? 1.5,
+                  opacity: operation.opacity ?? 1,
+                },
+              },
+            })
           } else {
             const element = slide.getElementById(operation.elementId)
-            if (element === null || !('getType' in element) || element.getType() !== PageElementTypeEnum.Text) {
+            if (element === null || (!('getText' in element) && (!('getType' in element) || element.getType() !== PageElementTypeEnum.Text))) {
               throw new Error(`找不到文本元素：${operation.elementId}`)
             }
-            const data = element.getData() as ISlideTextElement
-            if (operation.text !== undefined || operation.fontSize !== undefined || operation.fontColor !== undefined || operation.bold !== undefined) {
+            const editableElement = element as any
+            const data = typeof editableElement.getData === 'function' ? editableElement.getData() as ISlideTextElement : {} as ISlideTextElement
+            if ('getText' in element) {
+              const shapeText = (element as any).getText()
+              if (operation.text !== undefined) shapeText.setText(operation.text)
+              if (operation.fontSize !== undefined) shapeText.setFontSize(operation.fontSize)
+              if (operation.fontColor !== undefined) shapeText.setColor(operation.fontColor)
+              if (operation.bold !== undefined) shapeText.setBold(operation.bold)
+            } else if (operation.text !== undefined || operation.fontSize !== undefined || operation.fontColor !== undefined || operation.bold !== undefined) {
               const richText = runtime.univerAPI.newRichText().span(operation.text ?? data.text ?? '', {
                 fontSize: operation.fontSize ?? data.textStyle?.fontSize ?? 30,
                 color: operation.fontColor ?? data.textStyle?.color ?? '#333333',
                 bold: operation.bold ?? data.textStyle?.bold ?? true,
               })
-              element.setRichText(richText)
+              editableElement.setRichText(richText)
             }
-            const transform = element.getTransform()
+            const transform = editableElement.getTransform() ?? {}
             if (operation.left !== undefined || operation.top !== undefined) {
-              element.setPosition(operation.left ?? transform.left ?? 0, operation.top ?? transform.top ?? 0)
+              if ('getText' in element) editableElement.setAbsolutePosition(operation.left ?? transform.left ?? 0, operation.top ?? transform.top ?? 0)
+              else editableElement.setPosition(operation.left ?? transform.left ?? 0, operation.top ?? transform.top ?? 0)
             }
             if (operation.width !== undefined || operation.height !== undefined) {
-              element.setSize(Math.max(1, operation.width ?? transform.width ?? 1), Math.max(1, operation.height ?? transform.height ?? 1))
+              editableElement.setSize(Math.max(1, operation.width ?? transform.width ?? 1), Math.max(1, operation.height ?? transform.height ?? 1))
             }
           }
         }
         appliedRef.current.add(operation.seq)
+        appliedNewOperation = true
+      }
+      if (appliedNewOperation) {
+        const presentation = runtimeRef.current?.presentation
+        const connection = clientConnection.current
+        if (presentation !== undefined && connection !== null) {
+          const nextSnapshot = presentation.save()
+          const serialized = JSON.stringify(nextSnapshot)
+          void connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot: nextSnapshot }).then((result) => {
+            if (result.ok) lastSavedRef.current = serialized
+          }).catch((reason) => {
+            setError(`操作后保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
+          })
+        }
       }
       setError(null)
     } catch (reason) {
@@ -1869,6 +2114,72 @@ function SlideProductView(props: ConvViewProps) {
       pendingSaveRef.current = save
     }, 800)
     return () => window.clearInterval(timer)
+  }, [sessionId])
+
+  useEffect(() => {
+    let disposed = false
+    let polling = false
+    const poll = async () => {
+      if (!hostLoaded || !presentationVisible || polling) return
+      polling = true
+      try {
+        const connection = clientConnection.current
+        if (connection === null) return
+        const response = await connection.rpc.call('/dsh-univer-create', 'slide-screenshot-requests', { sessionId })
+      if (!response.ok || disposed || !Array.isArray(response.value)) return
+      for (const rawRequest of response.value) {
+        if (rawRequest === null || typeof rawRequest !== 'object') continue
+        const request = rawRequest as Partial<SlideScreenshotRequest>
+        if (typeof request.id !== 'string' || typeof request.slideIndex !== 'number' || (request.mode !== 'slide' && request.mode !== 'editor')) continue
+        if (screenshotInFlightRef.current.has(request.id)) continue
+        screenshotInFlightRef.current.add(request.id)
+        try {
+          const runtime = runtimeRef.current
+          if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Slide')
+          const captured = await captureRenderedSlide(runtime, request.slideIndex, request.mode)
+          await connection.rpc.call('/dsh-univer-create', 'slide-screenshot-result', {
+            sessionId,
+            screenshotId: request.id,
+            ...captured,
+          })
+        } catch (reason) {
+          await connection.rpc.call('/dsh-univer-create', 'slide-screenshot-result', {
+            sessionId,
+            screenshotId: request.id,
+            error: reason instanceof Error ? reason.message : String(reason),
+          }).catch(() => {})
+        } finally {
+          screenshotInFlightRef.current.delete(request.id)
+        }
+      }
+      } finally {
+        polling = false
+      }
+    }
+    void poll().catch(() => {})
+    const timer = window.setInterval(() => void poll().catch(() => {}), 1000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      screenshotInFlightRef.current.clear()
+    }
+  }, [sessionId, hostLoaded, presentationVisible])
+
+  useEffect(() => {
+    const sendHeartbeat = () => {
+      const connection = clientConnection.current
+      const container = containerRef.current
+      if (connection === null || container === null) return
+      const active = getComputedStyle(container).visibility !== 'hidden'
+      void connection.rpc.call('/dsh-univer-create', 'slide-runtime-heartbeat', { sessionId, active }).catch(() => {})
+    }
+    sendHeartbeat()
+    const timer = window.setInterval(sendHeartbeat, 1000)
+    return () => {
+      window.clearInterval(timer)
+      const connection = clientConnection.current
+      if (connection !== null) void connection.rpc.call('/dsh-univer-create', 'slide-runtime-heartbeat', { sessionId, active: false }).catch(() => {})
+    }
   }, [sessionId])
 
   useLayoutEffect(() => () => {
@@ -2012,23 +2323,33 @@ function SlideProductView(props: ConvViewProps) {
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container dsh-univer-create-container--slides" />
-      {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
-      {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
+       
       {presentationVisible && (
-        <>
-          <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
-            <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
-            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream">
-              {chatLines.map((line, index) => (
-                <div className="dsh-univer-create-chat-overlay__line" key={`${line.role}-${index}-${line.text.slice(0, 16)}`}>
-                  <strong>{line.role}</strong><span>{line.text}</span>
-                </div>
-              ))}
-              {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
+         <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
+           <div className="dsh-univer-create-chat-overlay__header">
+              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <button
+                className="dsh-univer-create-chat-overlay__toggle"
+                type="button"
+                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-expanded={chatOverlayVisible}
+                onClick={() => setChatOverlayVisible((visible) => !visible)}
+              >
+                {chatOverlayVisible ? '隐藏' : '显示'}
+              </button>
             </div>
-          </aside>
-        </>
-      )}
+           <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
+             {chatLines.map((line, index) => (
+               <div className="dsh-univer-create-chat-overlay__line" key={`${line.role}-${index}-${line.text.slice(0, 16)}`}>
+                 <strong>{line.role}</strong><span>{line.text}</span>
+               </div>
+             ))}
+             {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
+           </div>
+         </aside>
+       )}
+       {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
+      {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
       {error !== null && <div className="dsh-univer-create-error" role="alert">幻灯片操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
     </section>
   )
@@ -2067,11 +2388,15 @@ function UniverView(props: ConvViewProps) {
         <button className={`dsh-univer-create-product-tab${unitType === 'doc' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'doc'} onClick={() => selectUnit('doc')}>Doc</button>
         <button className={`dsh-univer-create-product-tab${unitType === 'slide' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'slide'} onClick={() => selectUnit('slide')}>Slide</button>
       </nav>
-      {unitType === 'sheet'
-        ? <SheetProductView key={`${props.sessionId}:sheet`} {...props} />
-        : unitType === 'doc'
-          ? <DocProductView key={`${props.sessionId}:doc`} {...props} />
-          : <SlideProductView key={`${props.sessionId}:slide`} {...props} />}
+      <div className={`dsh-univer-create-product-pane${unitType === 'sheet' ? ' is-active' : ''}`} aria-hidden={unitType !== 'sheet'}>
+        <SheetProductView key={`${props.sessionId}:sheet`} {...props} />
+      </div>
+      <div className={`dsh-univer-create-product-pane${unitType === 'doc' ? ' is-active' : ''}`} aria-hidden={unitType !== 'doc'}>
+        <DocProductView key={`${props.sessionId}:doc`} {...props} />
+      </div>
+      <div className={`dsh-univer-create-product-pane${unitType === 'slide' ? ' is-active' : ''}`} aria-hidden={unitType !== 'slide'}>
+        <SlideProductView key={`${props.sessionId}:slide`} {...props} />
+      </div>
     </section>
   )
 }
