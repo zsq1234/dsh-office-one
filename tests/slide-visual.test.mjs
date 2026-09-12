@@ -12,7 +12,7 @@ test('AI-created slides use the blank layout and suppress inherited placeholders
   assert.match(client, /id\.startsWith\('slide-text-'\)/)
 })
 
-test('slide screenshots use rendered canvases and exclude the React chat overlay', () => {
+test('slide screenshots use rendered canvases while keeping the React chat overlay', () => {
   assert.match(client, /querySelectorAll\('canvas'\)/)
   assert.match(client, /toDataURL\('image\/png'\)/)
   assert.match(client, /'slide-screenshot-requests'/)
@@ -21,7 +21,7 @@ test('slide screenshots use rendered canvases and exclude the React chat overlay
   const slideStart = client.indexOf('function SlideProductView(')
   const slideEnd = client.indexOf('const selectedUnitBySession', slideStart)
   const slideView = client.slice(slideStart, slideEnd)
-  assert.ok(!slideView.includes('dsh-univer-create-chat-overlay'), 'Slide view must not cover the canvas with chat text')
+  assert.match(slideView, /dsh-univer-create-chat-overlay/)
 })
 
 test('host exposes visual screenshot tool and richer layout metadata', () => {

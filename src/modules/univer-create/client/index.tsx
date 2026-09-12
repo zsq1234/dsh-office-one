@@ -2324,7 +2324,31 @@ function SlideProductView(props: ConvViewProps) {
       )}
       <div ref={containerRef} className="dsh-univer-create-container dsh-univer-create-container--slides" />
        
-      {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
+      {presentationVisible && (
+         <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
+           <div className="dsh-univer-create-chat-overlay__header">
+              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <button
+                className="dsh-univer-create-chat-overlay__toggle"
+                type="button"
+                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-expanded={chatOverlayVisible}
+                onClick={() => setChatOverlayVisible((visible) => !visible)}
+              >
+                {chatOverlayVisible ? '隐藏' : '显示'}
+              </button>
+            </div>
+           <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
+             {chatLines.map((line, index) => (
+               <div className="dsh-univer-create-chat-overlay__line" key={`${line.role}-${index}-${line.text.slice(0, 16)}`}>
+                 <strong>{line.role}</strong><span>{line.text}</span>
+               </div>
+             ))}
+             {partialText && <div className="dsh-univer-create-chat-overlay__line dsh-univer-create-chat-overlay__line--live"><strong>AI</strong><span>{partialText}</span></div>}
+           </div>
+         </aside>
+       )}
+       {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
       {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
       {error !== null && <div className="dsh-univer-create-error" role="alert">幻灯片操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
     </section>
