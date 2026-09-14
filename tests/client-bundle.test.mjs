@@ -31,6 +31,23 @@ test('client extends the built-in document preview without its own Workspace tab
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-sidebar-documentpreview'))
 })
 
+test('workspace workbooks use isolated bounded keep-alive runtimes', async () => {
+  const code = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+
+  assert.ok(code.includes('dsh-wfv-sheet-runtime-parking'))
+  assert.ok(code.includes('dsh-wfv-sheet-frame'))
+  assert.ok(code.includes('MAX_CACHED_SHEET_RUNTIMES'))
+  assert.ok(code.includes('MAX_CACHED_OFFICE_PAYLOADS'))
+  assert.ok(code.includes('OFFICE_RUNTIME_LIMITS'))
+  assert.ok(code.includes('officeResumeSnapshots'))
+  assert.ok(code.includes('dsh-wfv-office-runtime-parking'))
+  assert.match(code, /runtimeKey:/)
+  assert.match(code, /sourceModified/)
+  assert.match(code, /moveBefore/)
+  assert.match(code, /saveLeasesRef/)
+  assert.match(code, /contentDocument/)
+})
+
 test('Univer view reads the target-neutral Chat projection', async () => {
   const code = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
 

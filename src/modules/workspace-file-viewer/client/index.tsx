@@ -55,7 +55,7 @@ type UniverSheetRuntime = {
 }
 type UniverDocumentRuntime = { univer: { dispose: () => void }; univerAPI: { createDocument: (snapshot: unknown) => SaveableUnit; getActiveDocument?: () => SaveableUnit | null } }
 type UniverSlidesRuntime = { dispose: () => void; createUnit: (type: unknown, snapshot: unknown) => SaveableUnit }
-type SnapshotProviderRef = React.MutableRefObject<(() => unknown) | null>
+type SnapshotProviderRef = React.MutableRefObject<(() => unknown | Promise<unknown>) | null>
 
 type RuntimeFactory = (container: HTMLElement) => UniverDocumentRuntime | UniverSlidesRuntime
 
@@ -66,39 +66,367 @@ type RuntimeGlobal = {
   createSlide?: (runtime: UniverSlidesRuntime, snapshot: unknown) => unknown
 }
 
-const runtimePromises: Record<string, Promise<RuntimeGlobal>> = {}
-let runtimeLifecycle: Promise<void> = Promise.resolve()
+// Redi is effectively a singleton inside one JavaScript realm for this Univer
+// release. Each cached workbook therefore owns an iframe realm: workbooks can
+// remain alive while Workspace tabs switch without sharing (and corrupting) an
+// injector. On browsers with Element.moveBefore, the iframe is moved to an
+// off-screen parking host without resetting its browsing context; older browsers
+// safely dispose/rebuild instead of retaining a stale runtime object.
+const MAX_CACHED_SHEET_RUNTIMES = 4
+const sheetFrameCache = new Map<string, SheetFrameEntry>()
+let sheetFrameInstanceSequence = 0
+let sheetFrameParkingHost: HTMLDivElement | null = null
 
-function afterRuntimeLifecycle<T>(task: () => T | Promise<T>): Promise<T> {
-  return runtimeLifecycle.then(task)
+type SheetFrameEntry = {
+  key: string
+  sourceModified: string
+  iframe: HTMLIFrameElement
+  runtime: UniverSheetRuntime | null
+  replayError: unknown | null
+  ready: Promise<UniverSheetRuntime>
+  rejectReady: ((reason: unknown) => void) | null
+  owner: symbol | null
+  onMutation: ((mutation: WorkbookMutation) => void) | null
+  disposed: boolean
+  lastUsed: number
 }
 
-function queueRuntimeDispose(dispose: () => void): void {
-  runtimeLifecycle = runtimeLifecycle.then(() => new Promise<void>((resolve) => {
-    window.setTimeout(() => {
-      try { dispose() } finally { resolve() }
-    }, 0)
-  }))
+function getSheetFrameParkingHost(): HTMLDivElement {
+  if (sheetFrameParkingHost?.isConnected) return sheetFrameParkingHost
+  const host = document.createElement('div')
+  host.className = 'dsh-wfv-sheet-runtime-parking'
+  host.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(host)
+  sheetFrameParkingHost = host
+  return host
 }
 
-function loadRuntime(kind: 'sheet' | 'docs' | 'slides'): Promise<RuntimeGlobal> {
-  const existing = runtimePromises[kind]
-  if (existing) return existing
-  const url = `/api/workspace-file-viewer/runtime/${kind}.js`
-  const globalKey = kind === 'sheet' ? 'createSheetRuntime' : kind === 'docs' ? 'createDocsRuntime' : 'createSlidesRuntime'
-  runtimePromises[kind] = new Promise((resolve, reject) => {
-    const script = document.createElement('script')
-    script.src = url
-    script.async = true
-    script.onload = () => {
-      const runtime = (window as Window & { __DSH_WORKSPACE_FILE_VIEWER__?: RuntimeGlobal }).__DSH_WORKSPACE_FILE_VIEWER__
-      if (!runtime?.[globalKey]) reject(new Error(`runtime ${kind} did not expose ${globalKey}`))
-      else resolve(runtime)
-    }
-    script.onerror = () => reject(new Error(`failed to load ${url}`))
-    document.head.appendChild(script)
+type StatePreservingParent = HTMLElement & {
+  moveBefore?: (node: Node, child: Node | null) => void
+}
+
+function supportsStatePreservingMove(parent: HTMLElement): parent is StatePreservingParent & Required<Pick<StatePreservingParent, 'moveBefore'>> {
+  return typeof (parent as StatePreservingParent).moveBefore === 'function'
+}
+
+function moveSheetFrame(parent: HTMLElement, iframe: HTMLIFrameElement): boolean {
+  if (parent.isConnected && iframe.isConnected && supportsStatePreservingMove(parent)) {
+    parent.moveBefore(iframe, null)
+    return true
+  }
+  parent.appendChild(iframe)
+  return false
+}
+
+function disposeSheetFrame(entry: SheetFrameEntry): void {
+  if (entry.disposed) return
+  entry.disposed = true
+  if (sheetFrameCache.get(entry.key) === entry) sheetFrameCache.delete(entry.key)
+  entry.rejectReady?.(new Error('sheet runtime was disposed before initialization'))
+  entry.rejectReady = null
+  entry.runtime?.univer.dispose()
+  entry.iframe.remove()
+}
+
+function advanceSheetFrameVersion(key: string, previousModified: string, nextModified: string): void {
+  const entry = sheetFrameCache.get(key)
+  if (entry?.sourceModified === previousModified) entry.sourceModified = nextModified
+}
+
+function trimSheetFrameCache(): void {
+  if (sheetFrameCache.size <= MAX_CACHED_SHEET_RUNTIMES) return
+  const parked = [...sheetFrameCache.values()]
+    .filter((entry) => entry.owner === null)
+    .sort((left, right) => left.lastUsed - right.lastUsed)
+  while (sheetFrameCache.size > MAX_CACHED_SHEET_RUNTIMES && parked.length > 0) {
+    disposeSheetFrame(parked.shift()!)
+  }
+}
+
+type OfficePayload = {
+  modified?: string
+  workbook?: unknown
+  document?: unknown
+  presentation?: unknown
+}
+
+type OfficePayloadCacheEntry = {
+  sourceRef: WeakRef<object> | null
+  promise: Promise<OfficePayload>
+  value?: OfficePayload
+  lastUsed: number
+}
+
+const MAX_CACHED_OFFICE_PAYLOADS = 16
+const officePayloadCache = new Map<string, OfficePayloadCacheEntry>()
+
+function trimOfficePayloadCache(): void {
+  const fulfilled = [...officePayloadCache.entries()]
+    .filter(([, entry]) => entry.value !== undefined)
+    .sort((left, right) => left[1].lastUsed - right[1].lastUsed)
+  while (officePayloadCache.size > MAX_CACHED_OFFICE_PAYLOADS && fulfilled.length > 0) {
+    officePayloadCache.delete(fulfilled.shift()![0])
+  }
+}
+
+function loadOfficePayload(key: string, source: object, request: () => Promise<OfficePayload>): OfficePayloadCacheEntry {
+  const cached = officePayloadCache.get(key)
+  if (cached && cached.sourceRef?.deref() === source) {
+    cached.lastUsed = Date.now()
+    return cached
+  }
+  if (cached) officePayloadCache.delete(key)
+  const entry: OfficePayloadCacheEntry = {
+    sourceRef: new WeakRef(source),
+    promise: Promise.resolve(null as never),
+    lastUsed: Date.now(),
+  }
+  entry.promise = request().then((value) => {
+    entry.value = value
+    trimOfficePayloadCache()
+    return value
+  }, (reason) => {
+    if (officePayloadCache.get(key) === entry) officePayloadCache.delete(key)
+    throw reason
   })
-  return runtimePromises[kind]
+  officePayloadCache.set(key, entry)
+  trimOfficePayloadCache()
+  return entry
+}
+
+function updateOfficePayload(key: string, value: OfficePayload): void {
+  const sourceRef = officePayloadCache.get(key)?.sourceRef ?? null
+  const entry: OfficePayloadCacheEntry = { sourceRef, value, promise: Promise.resolve(value), lastUsed: Date.now() }
+  officePayloadCache.set(key, entry)
+  trimOfficePayloadCache()
+}
+
+function createSheetFrame(
+  key: string,
+  sourceModified: string,
+  initialParent: HTMLElement,
+  snapshot: unknown,
+  draftMutations: WorkbookMutation[],
+): SheetFrameEntry {
+  const iframe = document.createElement('iframe')
+  iframe.className = 'dsh-wfv-sheet-frame'
+  iframe.title = '电子表格 Univer 编辑器'
+  iframe.inert = true
+  iframe.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>html,body,#app{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}#app{position:relative}</style></head><body><div id="app"></div></body></html>'
+  const entry: SheetFrameEntry = {
+    key,
+    sourceModified,
+    iframe,
+    runtime: null,
+    replayError: null,
+    ready: Promise.resolve(null as never),
+    rejectReady: null,
+    owner: null,
+    onMutation: null,
+    disposed: false,
+    lastUsed: Date.now(),
+  }
+  entry.ready = new Promise<UniverSheetRuntime>((resolve, reject) => {
+    entry.rejectReady = reject
+    iframe.addEventListener('load', () => {
+      const frameDocument = iframe.contentDocument
+      const frameWindow = iframe.contentWindow as (Window & { __DSH_WORKSPACE_FILE_VIEWER__?: RuntimeGlobal }) | null
+      const mount = frameDocument?.getElementById('app')
+      if (!frameDocument || !frameWindow || !mount) {
+        reject(new Error('sheet runtime iframe is unavailable'))
+        return
+      }
+      const script = frameDocument.createElement('script')
+      script.src = '/api/workspace-file-viewer/runtime/sheet.js'
+      script.onload = () => {
+        try {
+          const createSheetRuntime = frameWindow.__DSH_WORKSPACE_FILE_VIEWER__?.createSheetRuntime
+          if (!createSheetRuntime) throw new Error('sheet runtime factory is unavailable')
+          const runtime = createSheetRuntime(mount, snapshot)
+          entry.runtime = runtime
+          // Subscribe before replay so no user mutation can fall into the gap;
+          // replay commands are already filtered by dshDraftReplay in runtime.
+          runtime.onMutation((mutation) => entry.onMutation?.(mutation))
+          void runtime.replayMutations(draftMutations).then(() => {
+            if (entry.disposed) return
+            entry.rejectReady = null
+            iframe.inert = false
+            resolve(runtime)
+          }, (reason) => {
+            entry.replayError = reason
+            reject(reason)
+          })
+        } catch (reason) {
+          reject(reason)
+        }
+      }
+      script.onerror = () => reject(new Error('failed to load sheet runtime'))
+      frameDocument.head.appendChild(script)
+    }, { once: true })
+  })
+  void entry.ready.catch(() => disposeSheetFrame(entry))
+  initialParent.appendChild(iframe)
+  sheetFrameCache.set(key, entry)
+  return entry
+}
+
+type CachedOfficeKind = 'docs' | 'slides'
+type CachedOfficeFrameEntry = {
+  kind: CachedOfficeKind
+  key: string
+  resumeKey: string
+  sourceModified: string
+  iframe: HTMLIFrameElement
+  ready: Promise<() => unknown>
+  rejectReady: ((reason: unknown) => void) | null
+  snapshotProvider: (() => unknown) | null
+  disposeRuntime: (() => void) | null
+  owner: symbol | null
+  disposed: boolean
+  lastUsed: number
+}
+
+const OFFICE_RUNTIME_LIMITS: Record<CachedOfficeKind, number> = { docs: 3, slides: 2 }
+const officeFrameCaches: Record<CachedOfficeKind, Map<string, CachedOfficeFrameEntry>> = {
+  docs: new Map(),
+  slides: new Map(),
+}
+const officeFrameBySnapshotProvider = new WeakMap<() => unknown, CachedOfficeFrameEntry>()
+type OfficeResumeSnapshot = { sourceModified: string; snapshot: unknown; lastUsed: number }
+const officeResumeLimits: Record<CachedOfficeKind, number> = { docs: 8, slides: 4 }
+const officeResumeSnapshots: Record<CachedOfficeKind, Map<string, OfficeResumeSnapshot>> = {
+  docs: new Map(),
+  slides: new Map(),
+}
+let officeFrameInstanceSequence = 0
+let officeFrameParkingHost: HTMLDivElement | null = null
+
+function getOfficeFrameParkingHost(): HTMLDivElement {
+  if (officeFrameParkingHost?.isConnected) return officeFrameParkingHost
+  const host = document.createElement('div')
+  host.className = 'dsh-wfv-office-runtime-parking'
+  host.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(host)
+  officeFrameParkingHost = host
+  return host
+}
+
+function rememberOfficeSnapshot(entry: CachedOfficeFrameEntry): void {
+  if (!entry.snapshotProvider) return
+  try {
+    const snapshot = entry.snapshotProvider()
+    if (snapshot instanceof Promise) return
+    const cache = officeResumeSnapshots[entry.kind]
+    cache.set(entry.resumeKey, { sourceModified: entry.sourceModified, snapshot, lastUsed: Date.now() })
+    const oldest = [...cache.entries()].sort((left, right) => left[1].lastUsed - right[1].lastUsed)
+    while (cache.size > officeResumeLimits[entry.kind] && oldest.length > 0) cache.delete(oldest.shift()![0])
+  } catch (reason) {
+    console.error(`Failed to preserve ${entry.kind} edits before disposing runtime`, reason)
+  }
+}
+
+function disposeOfficeFrame(entry: CachedOfficeFrameEntry, preserveSnapshot = true): void {
+  if (entry.disposed) return
+  entry.disposed = true
+  if (preserveSnapshot) rememberOfficeSnapshot(entry)
+  const cache = officeFrameCaches[entry.kind]
+  if (cache.get(entry.key) === entry) cache.delete(entry.key)
+  entry.rejectReady?.(new Error(`${entry.kind} runtime was disposed before initialization`))
+  entry.rejectReady = null
+  entry.disposeRuntime?.()
+  entry.iframe.remove()
+}
+
+function trimOfficeFrameCache(kind: CachedOfficeKind): void {
+  const cache = officeFrameCaches[kind]
+  const parked = [...cache.values()]
+    .filter((entry) => entry.owner === null)
+    .sort((left, right) => left.lastUsed - right.lastUsed)
+  while (cache.size > OFFICE_RUNTIME_LIMITS[kind] && parked.length > 0) disposeOfficeFrame(parked.shift()!)
+}
+
+function advanceOfficeProviderVersion(provider: () => unknown, previousModified: string, nextModified: string): void {
+  const entry = officeFrameBySnapshotProvider.get(provider)
+  if (entry?.sourceModified === previousModified) entry.sourceModified = nextModified
+}
+
+function createOfficeFrame(
+  kind: CachedOfficeKind,
+  key: string,
+  resumeKey: string,
+  sourceModified: string,
+  initialParent: HTMLElement,
+  snapshot: unknown,
+): CachedOfficeFrameEntry {
+  const iframe = document.createElement('iframe')
+  iframe.className = `dsh-wfv-office-frame dsh-wfv-${kind}-frame`
+  iframe.title = kind === 'docs' ? '文档 Univer 编辑器' : '演示文稿 Univer 编辑器'
+  iframe.inert = true
+  iframe.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>html,body,#app{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}#app{position:relative}#app>div{height:100%!important;min-height:0!important}#app .univer-relative.univer-isolate.univer-h-full{position:absolute!important;inset:0!important;height:100%!important;min-height:0!important}#app canvas{display:block}</style></head><body><div id="app"></div></body></html>'
+  const entry: CachedOfficeFrameEntry = {
+    kind,
+    key,
+    resumeKey,
+    sourceModified,
+    iframe,
+    ready: Promise.resolve(null as never),
+    rejectReady: null,
+    snapshotProvider: null,
+    disposeRuntime: null,
+    owner: null,
+    disposed: false,
+    lastUsed: Date.now(),
+  }
+  entry.ready = new Promise<() => unknown>((resolve, reject) => {
+    entry.rejectReady = reject
+    iframe.addEventListener('load', () => {
+      const frameDocument = iframe.contentDocument
+      const frameWindow = iframe.contentWindow as (Window & { __DSH_WORKSPACE_FILE_VIEWER__?: RuntimeGlobal }) | null
+      const mount = frameDocument?.getElementById('app')
+      if (!frameDocument || !frameWindow || !mount) {
+        reject(new Error(`${kind} runtime iframe is unavailable`))
+        return
+      }
+      const script = frameDocument.createElement('script')
+      script.src = `/api/workspace-file-viewer/runtime/${kind}.js`
+      script.onload = () => {
+        try {
+          const runtimeGlobal = frameWindow.__DSH_WORKSPACE_FILE_VIEWER__
+          let snapshotProvider: () => unknown
+          if (kind === 'docs') {
+            if (!runtimeGlobal?.createDocsRuntime) throw new Error('docs runtime factory is unavailable')
+            const runtime = runtimeGlobal.createDocsRuntime(mount) as UniverDocumentRuntime
+            const documentUnit = runtime.univerAPI.createDocument(snapshot as any)
+            entry.disposeRuntime = () => runtime.univer.dispose()
+            snapshotProvider = () => unitSnapshot(runtime.univerAPI.getActiveDocument?.() ?? documentUnit)
+          } else {
+            if (!runtimeGlobal?.createSlidesRuntime || !runtimeGlobal.createSlide) throw new Error('slides runtime factory is unavailable')
+            const runtime = runtimeGlobal.createSlidesRuntime(mount) as UniverSlidesRuntime
+            const presentation = runtimeGlobal.createSlide(runtime, snapshot) as SaveableUnit
+            entry.disposeRuntime = () => runtime.dispose()
+            snapshotProvider = () => unitSnapshot(presentation)
+          }
+          if (entry.disposed) {
+            entry.disposeRuntime()
+            return
+          }
+          entry.rejectReady = null
+          entry.snapshotProvider = snapshotProvider
+          officeFrameBySnapshotProvider.set(snapshotProvider, entry)
+          iframe.inert = false
+          resolve(snapshotProvider)
+        } catch (reason) {
+          reject(reason)
+        }
+      }
+      script.onerror = () => reject(new Error(`failed to load ${kind} runtime`))
+      frameDocument.head.appendChild(script)
+    }, { once: true })
+  })
+  void entry.ready.catch(() => disposeOfficeFrame(entry))
+  initialParent.appendChild(iframe)
+  officeFrameCaches[kind].set(key, entry)
+  return entry
 }
 
 const CODE_LANGUAGES: Record<string, string> = {
@@ -293,6 +621,8 @@ function useWorkbookDraftManager() {
   const hasWriteFailureRef = useRef(false)
   const shouldWarnBeforeUnloadRef = useRef(false)
   const releaseLockRef = useRef<(() => void) | null>(null)
+  const saveLeasesRef = useRef(0)
+  const releasePendingRef = useRef(false)
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -304,14 +634,22 @@ function useWorkbookDraftManager() {
     return () => {
       generationRef.current += 1
       window.removeEventListener('beforeunload', beforeUnload)
-      releaseLockRef.current?.()
-      releaseLockRef.current = null
+      if (saveLeasesRef.current > 0) releasePendingRef.current = true
+      else {
+        releaseLockRef.current?.()
+        releaseLockRef.current = null
+      }
     }
   }, [])
 
   const releaseLockAfterWrites = useCallback(() => {
+    if (saveLeasesRef.current > 0) {
+      releasePendingRef.current = true
+      return
+    }
     const release = releaseLockRef.current
     releaseLockRef.current = null
+    releasePendingRef.current = false
     if (release) writeChainRef.current = writeChainRef.current.then(release, release)
   }, [])
 
@@ -421,8 +759,15 @@ function useWorkbookDraftManager() {
   const prepareSave = useCallback(async () => {
     await writeChainRef.current
     const identity = identityRef.current
-    return identity ? { ...identity } : null
+    if (!identity) return null
+    saveLeasesRef.current += 1
+    return { ...identity }
   }, [])
+
+  const finishSave = useCallback(() => {
+    saveLeasesRef.current = Math.max(0, saveLeasesRef.current - 1)
+    if (saveLeasesRef.current === 0 && releasePendingRef.current) releaseLockAfterWrites()
+  }, [releaseLockAfterWrites])
 
   const commitSaved = useCallback(async (prepared: DraftIdentity | null, nextBaseModified: string) => {
     const identity = identityRef.current
@@ -464,7 +809,7 @@ function useWorkbookDraftManager() {
     setStatus(`草稿恢复失败：${reason instanceof Error ? reason.message : String(reason)}`)
   }, [])
 
-  return { mutations, status, reset, restore, record, prepareSave, commitSaved, markRestored, markRestoreFailed }
+  return { mutations, status, reset, restore, record, prepareSave, finishSave, commitSaved, markRestored, markRestoreFailed }
 }
 
 type DocumentPointMetadata = { startIndex: number; [key: string]: unknown }
@@ -545,6 +890,8 @@ function normalizeDocumentSnapshot(value: unknown): unknown {
 }
 
 function UniverWorkbook({
+  runtimeKey,
+  sourceModified,
   snapshot,
   snapshotProviderRef,
   draftMutations = [],
@@ -553,6 +900,8 @@ function UniverWorkbook({
   onDraftRestoreFailed,
   editingDisabled = false,
 }: {
+  runtimeKey: string
+  sourceModified: string
   snapshot: unknown
   snapshotProviderRef: SnapshotProviderRef
   draftMutations?: WorkbookMutation[]
@@ -562,8 +911,6 @@ function UniverWorkbook({
   editingDisabled?: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const runtimeRef = useRef<UniverSheetRuntime | null>(null)
-  const mutationDisposableRef = useRef<Disposable | null>(null)
   const onDraftMutationRef = useRef(onDraftMutation)
   const onDraftRestoredRef = useRef(onDraftRestored)
   const onDraftRestoreFailedRef = useRef(onDraftRestoreFailed)
@@ -579,97 +926,117 @@ function UniverWorkbook({
   useLayoutEffect(() => {
     const container = containerRef.current
     if (container === null || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => setLayoutVersion((value) => value + 1))
+    const observer = new ResizeObserver(() => {
+      const bounds = container.getBoundingClientRect()
+      if (bounds.width > 0 && bounds.height > 0 && !container.querySelector('.dsh-wfv-sheet-frame')) {
+        setLayoutVersion((value) => value + 1)
+      }
+    })
     observer.observe(container)
     return () => observer.disconnect()
   }, [])
 
   useLayoutEffect(() => {
     const container = containerRef.current
-    if (container === null || runtimeRef.current !== null) return
+    if (container === null) return
     const bounds = container.getBoundingClientRect()
     if (bounds.width <= 0 || bounds.height <= 0) return
 
-    const mount = document.createElement('div')
-    mount.className = 'dsh-wfv-univer-runtime'
-    container.appendChild(mount)
+    const owner = Symbol(runtimeKey)
+    let cached = sheetFrameCache.get(runtimeKey)
+    const occupiedByAnotherView = cached?.owner !== null && cached?.owner !== undefined
+    if (occupiedByAnotherView) cached = undefined
+    // Never let a live workbook cross a server version boundary: otherwise a
+    // later save could overwrite a newer file with the stale cached runtime.
+    if (cached && cached.sourceModified !== sourceModified) {
+      disposeSheetFrame(cached)
+      cached = undefined
+    }
+    // appendChild/reparenting reloads an iframe in older browsers. Fall back to
+    // a clean runtime rebuild there rather than retaining a stale runtime object.
+    if (cached && !supportsStatePreservingMove(container)) {
+      disposeSheetFrame(cached)
+      cached = undefined
+    }
+    const entry = cached ?? createSheetFrame(
+      occupiedByAnotherView ? `${runtimeKey}\u0000view-${++sheetFrameInstanceSequence}` : runtimeKey,
+      sourceModified,
+      container,
+      snapshot,
+      draftMutations,
+    )
+    const reused = cached !== undefined
+    entry.owner = owner
+    entry.onMutation = (mutation) => onDraftMutationRef.current?.(mutation)
+    entry.lastUsed = Date.now()
+    if (reused) moveSheetFrame(container, entry.iframe)
+    trimSheetFrameCache()
+
     let cancelled = false
-    void afterRuntimeLifecycle(async () => {
-      const { createSheetRuntime } = await loadRuntime('sheet')
-      if (cancelled) return
-      if (!createSheetRuntime) throw new Error('sheet runtime factory is unavailable')
-      const runtime = createSheetRuntime(mount, snapshot)
-      if (cancelled) {
-        queueRuntimeDispose(() => runtime.univer.dispose())
-        return
-      }
-      runtimeRef.current = runtime
+    void entry.ready.then((runtime) => {
+      if (cancelled || entry.owner !== owner) return
       snapshotProviderRef.current = () => unitSnapshot(runtime.workbook)
-      if (draftMutations.length > 0) {
-        try {
-          await runtime.replayMutations(draftMutations)
-          if (cancelled) return
-          onDraftRestoredRef.current?.()
-        } catch (reason) {
-          if (cancelled) return
-          console.error('Failed to replay workbook draft', reason)
-          onDraftRestoreFailedRef.current?.(reason)
-        }
+      if (entry.replayError !== null) onDraftRestoreFailedRef.current?.(entry.replayError)
+      else if (draftMutations.length > 0) onDraftRestoredRef.current?.()
+      const frameWindow = entry.iframe.contentWindow
+      if (frameWindow) {
+        const FrameEvent = (frameWindow as unknown as { Event: typeof Event }).Event
+        frameWindow.dispatchEvent(new FrameEvent('resize'))
       }
-      mutationDisposableRef.current = runtime.onMutation((mutation) => onDraftMutationRef.current?.(mutation))
-    }).catch((reason) => { if (!cancelled) console.error('Failed to load Sheet preview', reason) })
+    }).catch((reason) => {
+      if (!cancelled && entry.owner === owner) {
+        console.error('Failed to load Sheet preview', reason)
+        onDraftRestoreFailedRef.current?.(reason)
+        disposeSheetFrame(entry)
+      }
+    })
+
     return () => {
       cancelled = true
+      if (entry.owner !== owner) return
       snapshotProviderRef.current = null
-      mutationDisposableRef.current?.dispose()
-      mutationDisposableRef.current = null
-      const runtime = runtimeRef.current
-      if (runtime) {
-        runtimeRef.current = null
-        queueRuntimeDispose(() => runtime.univer.dispose())
+      entry.onMutation = null
+      entry.owner = null
+      entry.lastUsed = Date.now()
+      if (occupiedByAnotherView) {
+        disposeSheetFrame(entry)
+        return
       }
-      mount.remove()
+      const parkingHost = getSheetFrameParkingHost()
+      if (parkingHost.isConnected && entry.iframe.isConnected && supportsStatePreservingMove(parkingHost)) {
+        moveSheetFrame(parkingHost, entry.iframe)
+      } else {
+        disposeSheetFrame(entry)
+      }
+      trimSheetFrameCache()
     }
-  }, [snapshot, layoutVersion, snapshotProviderRef])
+  }, [runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef])
 
   return <div ref={containerRef} className="dsh-wfv-univer" aria-label="电子表格 Univer 预览" />
 }
 
-function UniverDocument({ snapshot, snapshotProviderRef }: { snapshot: unknown; snapshotProviderRef: SnapshotProviderRef }) {
+function CachedOfficeUnit({
+  kind,
+  runtimeKey,
+  sourceModified,
+  snapshot,
+  snapshotProviderRef,
+  editingDisabled = false,
+}: {
+  kind: CachedOfficeKind
+  runtimeKey: string
+  sourceModified: string
+  snapshot: unknown
+  snapshotProviderRef: SnapshotProviderRef
+  editingDisabled?: boolean
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const retryCountRef = useRef(0)
+  const [layoutVersion, setLayoutVersion] = useState(0)
 
   useEffect(() => {
-    const container = containerRef.current
-    if (container === null) return
-    let runtime: UniverDocumentRuntime | null = null
-    let cancelled = false
-    void afterRuntimeLifecycle(async () => {
-      const { createDocsRuntime } = await loadRuntime('docs')
-      if (cancelled) return
-      if (!createDocsRuntime) throw new Error('docs runtime factory is unavailable')
-      runtime = createDocsRuntime(container) as UniverDocumentRuntime
-      const documentUnit = runtime.univerAPI.createDocument(snapshot as any)
-      if (cancelled) queueRuntimeDispose(() => runtime?.univer.dispose())
-      else snapshotProviderRef.current = () => unitSnapshot(runtime?.univerAPI.getActiveDocument?.() ?? documentUnit)
-    }).catch((reason) => { if (!cancelled) console.error('Failed to load Docs preview', reason) })
-    return () => {
-      cancelled = true
-      snapshotProviderRef.current = null
-      const previous = runtime
-      runtime = null
-      // Queue teardown before the next file's runtime is created. Univer's
-      // nested React root must be detached first, but the global lifecycle
-      // container must also be free before another Unit runtime starts.
-      if (previous) queueRuntimeDispose(() => previous.univer.dispose())
-    }
-  }, [snapshot, snapshotProviderRef])
-
-  return <div ref={containerRef} className="dsh-wfv-univer dsh-wfv-univer-doc" aria-label="DOC Univer 预览" />
-}
-
-function UniverSlides({ snapshot, snapshotProviderRef }: { snapshot: unknown; snapshotProviderRef: SnapshotProviderRef }) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const runtimeRef = useRef<UniverSlidesRuntime | null>(null)
+    if (containerRef.current) containerRef.current.inert = editingDisabled
+  }, [editingDisabled])
 
   useLayoutEffect(() => {
     const container = containerRef.current
@@ -677,7 +1044,19 @@ function UniverSlides({ snapshot, snapshotProviderRef }: { snapshot: unknown; sn
     let frame = 0
     const notifyResize = () => {
       cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
+      frame = requestAnimationFrame(() => {
+        const iframe = container.querySelector<HTMLIFrameElement>('.dsh-wfv-office-frame')
+        if (!iframe) {
+          const bounds = container.getBoundingClientRect()
+          if (bounds.width > 0 && bounds.height > 0) setLayoutVersion((value) => value + 1)
+          return
+        }
+        const frameWindow = iframe.contentWindow
+        if (frameWindow) {
+          const FrameEvent = (frameWindow as unknown as { Event: typeof Event }).Event
+          frameWindow.dispatchEvent(new FrameEvent('resize'))
+        }
+      })
     }
     const observer = new ResizeObserver(notifyResize)
     observer.observe(container)
@@ -688,45 +1067,108 @@ function UniverSlides({ snapshot, snapshotProviderRef }: { snapshot: unknown; sn
     }
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current
     if (container === null) return
+    const bounds = container.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) return
+
+    const owner = Symbol(`${kind}:${runtimeKey}`)
+    const cache = officeFrameCaches[kind]
+    let cached = cache.get(runtimeKey)
+    const occupiedByAnotherView = cached?.owner !== null && cached?.owner !== undefined
+    if (occupiedByAnotherView) cached = undefined
+    if (cached && cached.sourceModified !== sourceModified) {
+      disposeOfficeFrame(cached)
+      cached = undefined
+    }
+    if (cached && !supportsStatePreservingMove(container)) {
+      disposeOfficeFrame(cached)
+      cached = undefined
+    }
+    const resumeCache = officeResumeSnapshots[kind]
+    const resume = resumeCache.get(runtimeKey)
+    const initialSnapshot = !cached && resume?.sourceModified === sourceModified ? resume.snapshot : snapshot
+    if (!cached && resume) resumeCache.delete(runtimeKey)
+    const entry = cached ?? createOfficeFrame(
+      kind,
+      occupiedByAnotherView ? `${runtimeKey}\u0000view-${++officeFrameInstanceSequence}` : runtimeKey,
+      runtimeKey,
+      sourceModified,
+      container,
+      initialSnapshot,
+    )
+    const reused = cached !== undefined
+    entry.owner = owner
+    entry.lastUsed = Date.now()
+    entry.iframe.inert = true
+    if (reused) moveSheetFrame(container, entry.iframe)
+    trimOfficeFrameCache(kind)
+
     let cancelled = false
     const resizeTimers: number[] = []
-    const notifyResize = (delay: number) => {
-      resizeTimers.push(window.setTimeout(() => {
-        if (!cancelled) window.dispatchEvent(new Event('resize'))
-      }, delay))
-    }
-    void afterRuntimeLifecycle(async () => {
-      const runtimeGlobal = await loadRuntime('slides')
-      if (cancelled) return
-      if (!runtimeGlobal.createSlidesRuntime || !runtimeGlobal.createSlide) throw new Error('slides runtime factory is unavailable')
-      const runtime = runtimeGlobal.createSlidesRuntime(container) as UniverSlidesRuntime
-      const presentation = runtimeGlobal.createSlide(runtime, snapshot) as SaveableUnit
-      if (cancelled) queueRuntimeDispose(() => runtime.dispose())
-      else {
-        runtimeRef.current = runtime
-        snapshotProviderRef.current = () => unitSnapshot(presentation)
-        // Slides UI creates the main scene and thumbnail scenes asynchronously.
-        // Re-measure after both the React tree and image resources have mounted.
-        notifyResize(0)
+    void entry.ready.then((getSnapshot) => {
+      if (cancelled || entry.owner !== owner) return
+      snapshotProviderRef.current = getSnapshot
+      retryCountRef.current = 0
+      entry.iframe.inert = false
+      const notifyResize = (delay: number) => {
+        resizeTimers.push(window.setTimeout(() => {
+          if (cancelled || entry.owner !== owner) return
+          const frameWindow = entry.iframe.contentWindow
+          if (!frameWindow) return
+          const FrameEvent = (frameWindow as unknown as { Event: typeof Event }).Event
+          frameWindow.dispatchEvent(new FrameEvent('resize'))
+        }, delay))
+      }
+      notifyResize(0)
+      if (kind === 'slides') {
         notifyResize(100)
         notifyResize(300)
         notifyResize(800)
       }
-    }).catch((reason) => { if (!cancelled) console.error('Failed to load Slides preview', reason) })
+    }).catch((reason) => {
+      if (cancelled || entry.owner !== owner) return
+      console.error(`Failed to load ${kind} preview`, reason)
+      if (retryCountRef.current < 1) {
+        retryCountRef.current += 1
+        setLayoutVersion((value) => value + 1)
+      }
+    })
+
     return () => {
       cancelled = true
-      snapshotProviderRef.current = null
       resizeTimers.forEach((timer) => window.clearTimeout(timer))
-      const runtime = runtimeRef.current
-      runtimeRef.current = null
-      if (runtime) queueRuntimeDispose(() => runtime.dispose())
+      if (entry.owner !== owner) return
+      snapshotProviderRef.current = null
+      entry.owner = null
+      entry.lastUsed = Date.now()
+      entry.iframe.inert = true
+      if (occupiedByAnotherView) {
+        disposeOfficeFrame(entry)
+        return
+      }
+      const parkingHost = getOfficeFrameParkingHost()
+      if (parkingHost.isConnected && entry.iframe.isConnected && supportsStatePreservingMove(parkingHost)) {
+        moveSheetFrame(parkingHost, entry.iframe)
+      } else {
+        disposeOfficeFrame(entry)
+      }
+      trimOfficeFrameCache(kind)
     }
-  }, [snapshot, snapshotProviderRef])
+  }, [kind, runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef])
 
-  return <div ref={containerRef} className="dsh-wfv-univer dsh-wfv-univer-slides" aria-label="PPT Univer 预览" />
+  const className = kind === 'docs' ? 'dsh-wfv-univer-doc' : 'dsh-wfv-univer-slides'
+  const label = kind === 'docs' ? 'DOC Univer 预览' : 'PPT Univer 预览'
+  return <div ref={containerRef} className={`dsh-wfv-univer ${className}`} aria-label={label} />
+}
+
+function UniverDocument(props: Omit<React.ComponentProps<typeof CachedOfficeUnit>, 'kind'>) {
+  return <CachedOfficeUnit kind="docs" {...props} />
+}
+
+function UniverSlides(props: Omit<React.ComponentProps<typeof CachedOfficeUnit>, 'kind'>) {
+  return <CachedOfficeUnit kind="slides" {...props} />
 }
 
 /*
@@ -964,9 +1406,11 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
     const requestVersion = ++saveRequestVersionRef.current
     setSaving(true)
     setSaveStatus('')
+    let sheetSavePrepared = false
     try {
       const preparedDraft = target.unitType === 'sheet' ? await workbookDraft.prepareSave() : null
-      const snapshot = getSnapshot()
+      sheetSavePrepared = preparedDraft !== null
+      const snapshot = await getSnapshot()
       const response = await fetch(`/api/workspace-office-save?sessionId=${encodeURIComponent(activeSessionId)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -980,13 +1424,28 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
       })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || '保存失败')
+      const savedAsNewFile = payload.path !== path
+      const runtimeKey = `${activeSessionId}\u0000${path}`
+      if (target.unitType === 'sheet') {
+        await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
+        if (!savedAsNewFile) advanceSheetFrameVersion(runtimeKey, loadedModified, payload.modified || '')
+      } else {
+        const kind: CachedOfficeKind = target.unitType === 'doc' ? 'docs' : 'slides'
+        if (!savedAsNewFile) advanceOfficeProviderVersion(getSnapshot, loadedModified, payload.modified || '')
+        officeResumeSnapshots[kind].delete(runtimeKey)
+      }
+      // This legacy surface can save a file also opened by DocumentPreview;
+      // invalidate address-keyed conversion payloads across surfaces.
+      officePayloadCache.clear()
+      if (savedAsNewFile && target.unitType === 'sheet') {
+        const oldRuntime = sheetFrameCache.get(runtimeKey)
+        if (oldRuntime) disposeSheetFrame(oldRuntime)
+        workbookDraft.reset()
+      }
       if (saveRequestVersionRef.current === requestVersion) {
-        const savedAsNewFile = payload.path !== path
-        if (target.unitType === 'sheet') await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
         setSaveStatus(`${savedAsNewFile ? '已另存为' : '已保存'} ${payload.path}`)
         setLoadedModified(payload.modified || '')
         if (savedAsNewFile) {
-          workbookDraft.reset()
           const rebound = await workbookDraft.restore(activeSessionId, payload.path, payload.modified || '')
           if (rebound === null) throw new Error('文件已另存，但无法取得新文件的草稿编辑锁；请重新打开该文件')
           setSelected(payload.path)
@@ -997,6 +1456,7 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
     } catch (reason) {
       if (saveRequestVersionRef.current === requestVersion) setSaveStatus(reason instanceof Error ? reason.message : String(reason))
     } finally {
+      if (sheetSavePrepared) workbookDraft.finishSave()
       if (saveRequestVersionRef.current === requestVersion) setSaving(false)
     }
   }
@@ -1087,6 +1547,8 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
           {!fileLoading && workbook !== null && (
             <UniverWorkbook
               key={selected}
+              runtimeKey={`${sessionId}\u0000${selected}`}
+              sourceModified={loadedModified}
               snapshot={workbook}
               snapshotProviderRef={snapshotProviderRef}
               draftMutations={workbookDraft.mutations}
@@ -1099,8 +1561,8 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
               editingDisabled={saving}
             />
           )}
-          {!fileLoading && documentData !== null && <UniverDocument key={selected} snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
-          {!fileLoading && slidesData !== null && <UniverSlides key={selected} snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
+          {!fileLoading && documentData !== null && <UniverDocument key={selected} runtimeKey={`${sessionId}\u0000${selected}`} sourceModified={loadedModified} snapshot={documentData} snapshotProviderRef={snapshotProviderRef} editingDisabled={saving} />}
+          {!fileLoading && slidesData !== null && <UniverSlides key={selected} runtimeKey={`${sessionId}\u0000${selected}`} sourceModified={loadedModified} snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} editingDisabled={saving} />}
           {!fileLoading && content !== null && <>
             {markdownFile && !markdownAllowed && <div className="dsh-wfv-muted" role="status">Markdown 文件较大，已切换为源码显示以保持流畅。</div>}
             {markdownFile && markdownAllowed && !markdownSource
@@ -1178,14 +1640,29 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     const isWorkbook = workbookFormat(file.path) !== null
     const isDocument = /\.(doc|docx)$/i.test(file.path)
     const endpoint = isWorkbook ? 'workspace-xlsx' : isDocument ? 'workspace-doc' : 'workspace-slides'
-    setLoading(true)
+    const previousPayload = officePayloadCache.get(resourceAddress)
+    if (previousPayload && previousPayload.sourceRef?.deref() !== content.data) {
+      const runtimeKey = `${file.sessionId}\u0000${file.path}`
+      if (isWorkbook) {
+        const staleRuntime = sheetFrameCache.get(runtimeKey)
+        if (staleRuntime?.owner === null) disposeSheetFrame(staleRuntime)
+      } else {
+        const kind: CachedOfficeKind = isDocument ? 'docs' : 'slides'
+        const staleRuntime = officeFrameCaches[kind].get(runtimeKey)
+        if (staleRuntime?.owner === null) disposeOfficeFrame(staleRuntime, false)
+        officeResumeSnapshots[kind].delete(runtimeKey)
+      }
+    }
+    const payloadEntry = loadOfficePayload(resourceAddress, content.data, async () => {
+      const response = await fetch(`/api/${endpoint}?sessionId=${encodeURIComponent(file.sessionId)}&path=${encodeURIComponent(file.path)}`)
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
+      return payload as OfficePayload
+    })
+    setLoading(payloadEntry.value === undefined)
     void (async () => {
       try {
-        const response = await fetch(`/api/${endpoint}?sessionId=${encodeURIComponent(file.sessionId)}&path=${encodeURIComponent(file.path)}`, {
-          signal: controller.signal,
-        })
-        const payload = await response.json()
-        if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
+        const payload = payloadEntry.value ?? await payloadEntry.promise
         if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
         setLoadedModified(payload.modified || '')
         if (isWorkbook) {
@@ -1222,9 +1699,11 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     const requestVersion = ++requestVersionRef.current
     setSaving(true)
     setSaveStatus('')
+    let sheetSavePrepared = false
     try {
       const preparedDraft = target.unitType === 'sheet' ? await workbookDraft.prepareSave() : null
-      const snapshot = getSnapshot()
+      sheetSavePrepared = preparedDraft !== null
+      const snapshot = await getSnapshot()
       const response = await fetch(`/api/workspace-office-save?sessionId=${encodeURIComponent(file.sessionId)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1238,11 +1717,32 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
       })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || '保存失败')
+      const savedAsNewFile = payload.path !== file.path
+      const runtimeKey = `${file.sessionId}\u0000${file.path}`
+      if (target.unitType === 'sheet') {
+        await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
+        if (!savedAsNewFile) advanceSheetFrameVersion(runtimeKey, loadedModified, payload.modified || '')
+      } else {
+        const kind: CachedOfficeKind = target.unitType === 'doc' ? 'docs' : 'slides'
+        if (!savedAsNewFile) advanceOfficeProviderVersion(getSnapshot, loadedModified, payload.modified || '')
+        officeResumeSnapshots[kind].delete(runtimeKey)
+      }
+      if (!savedAsNewFile) {
+        updateOfficePayload(resourceAddress, {
+          modified: payload.modified || '',
+          ...(target.unitType === 'sheet' ? { workbook: snapshot } : target.unitType === 'doc' ? { document: snapshot } : { presentation: snapshot }),
+        })
+      } else if (target.unitType === 'sheet') {
+        const oldRuntime = sheetFrameCache.get(runtimeKey)
+        if (oldRuntime) disposeSheetFrame(oldRuntime)
+        workbookDraft.reset()
+      } else {
+        const kind: CachedOfficeKind = target.unitType === 'doc' ? 'docs' : 'slides'
+        const oldRuntime = officeFrameBySnapshotProvider.get(getSnapshot)
+        if (oldRuntime) disposeOfficeFrame(oldRuntime, false)
+      }
       if (requestVersionRef.current === requestVersion) {
-        const savedAsNewFile = payload.path !== file.path
-        if (target.unitType === 'sheet') await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
         if (savedAsNewFile) {
-          workbookDraft.reset()
           setWorkbook(null)
           setSaveStatus(`已另存为 ${payload.path}；请从 Workspace 打开新文件继续编辑`)
         } else {
@@ -1253,6 +1753,7 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     } catch (reason) {
       if (requestVersionRef.current === requestVersion) setSaveStatus(reason instanceof Error ? reason.message : String(reason))
     } finally {
+      if (sheetSavePrepared) workbookDraft.finishSave()
       if (requestVersionRef.current === requestVersion) setSaving(false)
     }
   }
@@ -1283,6 +1784,8 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
       <div className="dsh-wfv-office-editor">
         {!loading && !error && workbook !== null && (
           <UniverWorkbook
+            runtimeKey={`${file.sessionId}\u0000${file.path}`}
+            sourceModified={loadedModified}
             snapshot={workbook}
             snapshotProviderRef={snapshotProviderRef}
             draftMutations={workbookDraft.mutations}
@@ -1295,8 +1798,8 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
             editingDisabled={saving}
           />
         )}
-        {!loading && !error && documentData !== null && <UniverDocument snapshot={documentData} snapshotProviderRef={snapshotProviderRef} />}
-        {!loading && !error && slidesData !== null && <UniverSlides snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} />}
+        {!loading && !error && documentData !== null && <UniverDocument runtimeKey={`${file.sessionId}\u0000${file.path}`} sourceModified={loadedModified} snapshot={documentData} snapshotProviderRef={snapshotProviderRef} editingDisabled={saving} />}
+        {!loading && !error && slidesData !== null && <UniverSlides runtimeKey={`${file.sessionId}\u0000${file.path}`} sourceModified={loadedModified} snapshot={slidesData} snapshotProviderRef={snapshotProviderRef} editingDisabled={saving} />}
       </div>
     </section>
   )
