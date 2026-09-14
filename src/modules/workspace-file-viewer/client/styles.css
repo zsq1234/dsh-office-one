@@ -66,6 +66,14 @@
 .dsh-wfv-code .token.italic { font-style: italic; }
 .dsh-wfv-univer { position: relative; flex: 1; min-width: 0; min-height: 320px; overflow: hidden; border: 1px solid var(--dsw-alias-border-l2, #e5e7eb); border-radius: 8px; }
 .dsh-wfv-univer-runtime { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+.dsh-wfv-sheet-frame { display: block; width: 100%; height: 100%; border: 0; }
+/* Keep cached iframe browsing contexts connected so their isolated Redi/Univer
+   runtimes survive Workspace tab switches. The host is inert and off-screen. */
+.dsh-wfv-sheet-runtime-parking { position: fixed; top: -10000px; left: -10000px; width: 1px; height: 1px; overflow: hidden; visibility: hidden; pointer-events: none; }
+.dsh-wfv-sheet-runtime-parking > .dsh-wfv-sheet-frame { width: 1px; height: 1px; }
+.dsh-wfv-office-frame { display: block; width: 100%; height: 100%; border: 0; }
+.dsh-wfv-office-runtime-parking { position: fixed; top: -10000px; left: -10000px; width: 1px; height: 1px; overflow: hidden; visibility: hidden; pointer-events: none; }
+.dsh-wfv-office-runtime-parking > .dsh-wfv-office-frame { width: 1px; height: 1px; }
 /* Slides presentation uses position: fixed. Establish a local containing block so
  * playback fills this viewer instead of covering the complete DSH application. */
 .dsh-wfv-univer-slides { contain: layout paint; isolation: isolate; transform: translateZ(0); }
