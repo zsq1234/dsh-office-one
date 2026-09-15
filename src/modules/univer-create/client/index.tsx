@@ -19,13 +19,23 @@ import { UniverRenderEnginePlugin } from '@univerjs/engine-render'
 import { UniverUIPlugin } from '@univerjs/ui'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
 import DesignZhCN from '@univerjs/design/locale/zh-CN'
+import ChartUIZhCN from '@univerjs-pro/chart-ui/locale/zh-CN'
+import { UniverDocsTablePlugin } from '@univerjs-pro/docs-table'
 import { UniverLicensePlugin } from '@univerjs-pro/license'
+import { UniverSheetsChartPlugin } from '@univerjs-pro/sheets-chart'
+import { UniverSheetsChartUIPlugin } from '@univerjs-pro/sheets-chart-ui'
+import SheetsChartUIZhCN from '@univerjs-pro/sheets-chart-ui/locale/zh-CN'
 import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { getSlidesEmptySnapshot, PageElementTypeEnum, UniverSlidesPlugin } from '@univerjs-pro/slides'
+import { installScrollContainment } from './scroll-containment.js'
 import type { ISlideData, ISlideTextElement } from '@univerjs-pro/slides'
 import type { FPresentation } from '@univerjs-pro/slides/facade'
 import { ShapeFillEnum, ShapeLineTypeEnum, ShapeTypeEnum } from '@univerjs-pro/engine-shape'
+import '@univerjs-pro/docs-table/facade'
+import '@univerjs-pro/engine-chart/facade'
+import '@univerjs-pro/chart-ui/facade'
+import '@univerjs-pro/sheets-chart/facade'
 import '@univerjs-pro/slides/facade'
 import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
 import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
@@ -33,6 +43,8 @@ import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
 import '@univerjs/preset-docs-core/lib/index.css'
 import '@univerjs/preset-docs-drawing/lib/index.css'
 import '@univerjs/preset-sheets-core/lib/index.css'
+import '@univerjs-pro/chart-ui/lib/index.css'
+import '@univerjs-pro/sheets-chart-ui/lib/index.css'
 import '@univerjs/design/lib/index.css'
 import '@univerjs/ui/lib/index.css'
 import '@univerjs/docs-ui/lib/index.css'
@@ -222,6 +234,22 @@ interface SlideScreenshotRequest {
   mode: 'slide' | 'editor'
 }
 
+interface DocScreenshotRequest {
+  id: string
+  mode: 'document' | 'editor'
+}
+
+interface UniverCodeRequest {
+  id: string
+  unitType: UniverUnitType
+  code: string
+}
+
+interface UniverCodeRuntime {
+  univerAPI: FUniver
+  save: () => unknown
+}
+
 function parseQueuedSheetOperation(value: unknown): SheetOperation | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const queued = value as Partial<QueuedSheetOperation>
@@ -238,6 +266,7 @@ const DOC_TOOL_NAMES = new Set([
   'univer_doc_append_text',
   'univer_doc_delete_range',
   'univer_doc_format_text',
+  'univer_doc_screenshot',
 ])
 
 function docOperationFromNode(node: ConversationNode): DocOperation | null {
@@ -759,6 +788,178 @@ function useConversationFeed(props: ConvViewProps): { nodes: readonly Conversati
 }
 
 const clientConnection: { current: ConnectionHandle | null } = { current: null }
+const univerCodeClientId = crypto.randomUUID()
+const UNIVER_CODE_DEBUG_FLAG = '__DSH_UNIVER_CODE_DEBUG__'
+
+function debugUniverCode(sessionId: string, unitType: UniverUnitType, requestId: string, code: string): void {
+  if ((globalThis as Record<string, unknown>)[UNIVER_CODE_DEBUG_FLAG] !== true) return
+  console.groupCollapsed(`[dsh-univer] execute ${unitType} code (${requestId})`)
+  console.debug({ sessionId, unitType, requestId })
+  console.log(code)
+  console.groupEnd()
+}
+
+const FORBIDDEN_UNIVER_CODE = [
+  { pattern: /\b(?:window|globalThis|self|top|parent|opener|frames|document|location|navigator|localStorage|sessionStorage|indexedDB|caches)\s*(?:\.|\[)/, reason: 'browser globals and network/storage APIs are not allowed' },
+  { pattern: /\b(?:fetch|XMLHttpRequest|WebSocket|Worker|SharedWorker|EventSource|setTimeout|setInterval|requestAnimationFrame|alert|confirm|prompt)\s*\(/, reason: 'browser networking, timers, and dialogs are not allowed' },
+  { pattern: /\b(?:eval|Function|require)\s*\(/, reason: 'dynamic code loading is not allowed' },
+  { pattern: /\bimport\s*(?:\(|["'])/, reason: 'imports are not available in the browser executor' },
+  { pattern: /(?:\.|\[\s*["'])(?:constructor|__proto__|prototype)(?:\b|["'])/, reason: 'prototype and constructor access is not allowed' },
+  { pattern: /\.(?:getInjector|getUniver|getPresentation|getWorkbook|getDocument)\s*\(/, reason: 'raw Univer internals are not allowed; use Facade methods only' },
+] as const
+
+function serializeCodeValue(value: unknown, maxLength = 50_000): string {
+  const seen = new WeakSet<object>()
+  let remainingNodes = 2_000
+  const sanitize = (item: unknown, depth: number): unknown => {
+    if (remainingNodes-- <= 0) return '[Truncated]'
+    if (item === null || typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') return item
+    if (typeof item === 'undefined') return 'undefined'
+    if (typeof item === 'bigint') return `${item}n`
+    if (typeof item === 'function') return `[Function ${item.name || 'anonymous'}]`
+    if (typeof item === 'symbol') return String(item)
+    if (typeof item !== 'object') return String(item)
+    if (seen.has(item)) return '[Circular]'
+    if (depth >= 8) return `[Object ${(item as { constructor?: { name?: string } }).constructor?.name ?? 'unknown'}]`
+    seen.add(item)
+    if (Array.isArray(item)) return item.slice(0, 100).map((entry) => sanitize(entry, depth + 1))
+    const prototype = Object.getPrototypeOf(item)
+    if (prototype !== Object.prototype && prototype !== null) {
+      return `[Object ${(item as { constructor?: { name?: string } }).constructor?.name ?? 'unknown'}]`
+    }
+    const output: Record<string, unknown> = {}
+    for (const key of Object.keys(item).slice(0, 100)) output[key] = sanitize((item as Record<string, unknown>)[key], depth + 1)
+    return output
+  }
+
+  let serialized: string
+  try {
+    serialized = JSON.stringify(sanitize(value, 0), null, 2) ?? String(value)
+  } catch {
+    serialized = String(value)
+  }
+  return serialized.length > maxLength ? `${serialized.slice(0, maxLength)}\n…[truncated]` : serialized
+}
+
+async function executeFacadeCode(code: string, univerAPI: FUniver): Promise<{ result?: string; logs: string[]; error?: string }> {
+  const blocked = FORBIDDEN_UNIVER_CODE.find(({ pattern }) => pattern.test(code))
+  if (blocked !== undefined) return { error: blocked.reason, logs: [] }
+
+  const logs: string[] = []
+  const appendLog = (level: string, values: unknown[]) => {
+    if (logs.length >= 200) return
+    logs.push(`[${level}] ${values.map((value) => serializeCodeValue(value, 2_000)).join(' ')}`)
+  }
+  const safeConsole = Object.freeze({
+    log: (...values: unknown[]) => appendLog('log', values),
+    info: (...values: unknown[]) => appendLog('info', values),
+    warn: (...values: unknown[]) => appendLog('warn', values),
+    error: (...values: unknown[]) => appendLog('error', values),
+  })
+
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>
+    const run = new AsyncFunction('univerAPI', 'console', `"use strict";\n${code}\n//# sourceURL=dsh-univer-execute-code.js`)
+    let timer = 0
+    try {
+      const result = await Promise.race([
+        run(univerAPI, safeConsole),
+        new Promise<never>((_resolve, reject) => {
+          timer = window.setTimeout(() => reject(new Error('code exceeded the 10 second asynchronous timeout')), 10_000)
+        }),
+      ])
+      return { result: serializeCodeValue(result), logs }
+    } finally {
+      window.clearTimeout(timer)
+    }
+  } catch (reason) {
+    return { error: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason), logs }
+  }
+}
+
+function useUniverCodeExecutor(
+  sessionId: string,
+  unitType: UniverUnitType,
+  ready: boolean,
+  runtimeRef: React.MutableRefObject<MountedRuntime | MountedSlideRuntime | null>,
+  savingRef: React.MutableRefObject<boolean>,
+  pendingSaveRef: React.MutableRefObject<Promise<void> | null>,
+  lastSavedRef: React.MutableRefObject<string | null>,
+): void {
+  const inFlightRef = useRef(new Set<string>())
+  useEffect(() => {
+    let disposed = false
+    let polling = false
+    const poll = async () => {
+      if (!ready || polling || runtimeRef.current === null || savingRef.current) return
+      polling = true
+      try {
+        const connection = clientConnection.current
+        if (connection === null) return
+        const response = await connection.rpc.call('/dsh-univer-create', 'univer-code-requests', { sessionId, unitType })
+        if (!response.ok || disposed || !Array.isArray(response.value)) return
+        for (const rawRequest of response.value) {
+          if (rawRequest === null || typeof rawRequest !== 'object') continue
+          const request = rawRequest as Partial<UniverCodeRequest>
+          if (typeof request.id !== 'string' || request.unitType !== unitType || typeof request.code !== 'string') continue
+          if (inFlightRef.current.has(request.id)) continue
+          const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
+            sessionId,
+            codeRequestId: request.id,
+            clientId: univerCodeClientId,
+          })
+          if (!claimed.ok || claimed.value === null || disposed) continue
+          inFlightRef.current.add(request.id)
+          let execution: { result?: string; logs: string[]; error?: string } = { logs: [] }
+          try {
+            await pendingSaveRef.current
+            const runtime = runtimeRef.current
+            if (disposed || runtime === null) throw new Error(`当前浏览器没有打开已创建的 Univer ${unitType}`)
+            savingRef.current = true
+            debugUniverCode(sessionId, unitType, request.id, request.code)
+            execution = await executeFacadeCode(request.code, runtime.univerAPI)
+            if (execution.error === undefined) {
+              const snapshot = unitType === 'slide'
+                ? (runtime as MountedSlideRuntime).presentation.save()
+                : unitType === 'doc'
+                  ? runtime.univerAPI.getActiveDocument()?.save()
+                  : runtime.univerAPI.getActiveWorkbook()?.save()
+              if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${unitType}`)
+              const serialized = JSON.stringify(snapshot)
+              const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType, snapshot })
+              if (!saved.ok) throw new Error(saved.error.message)
+              lastSavedRef.current = serialized
+            }
+          } catch (reason) {
+            execution = {
+              error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
+              logs: execution.logs,
+            }
+          } finally {
+            savingRef.current = false
+          }
+          await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
+            sessionId,
+            codeRequestId: request.id,
+            clientId: univerCodeClientId,
+            ...execution,
+          }).catch(() => {})
+          inFlightRef.current.delete(request.id)
+        }
+      } finally {
+        polling = false
+      }
+    }
+    void poll().catch(() => {})
+    const timer = window.setInterval(() => void poll().catch(() => {}), 300)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      inFlightRef.current.clear()
+    }
+  }, [sessionId, unitType, ready, runtimeRef, savingRef, pendingSaveRef, lastSavedRef])
+}
+
 // Browser-lifetime markers control only the initial loading presentation.
 // Persisted Host state, not these markers, decides whether a unit exists.
 const openedWorkbookSessions = new Set<string>()
@@ -795,6 +996,7 @@ function SheetProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  useUniverCodeExecutor(sessionId, 'sheet', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const queuedPersistingRef = useRef(false)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
@@ -909,11 +1111,15 @@ function SheetProductView(props: ConvViewProps) {
       const runtime = createUniver({
         locale: LocaleType.ZH_CN,
         locales: {
-          [LocaleType.ZH_CN]: mergeLocales(UniverPresetSheetsCoreZhCN),
+          [LocaleType.ZH_CN]: mergeLocales(UniverPresetSheetsCoreZhCN, ChartUIZhCN, SheetsChartUIZhCN),
         },
         theme: defaultTheme,
         presets: [UniverSheetsCorePreset({ container: mount })],
-        plugins: [[UniverLicensePlugin, { license: UNIVER_LICENSE }]],
+        plugins: [
+          [UniverLicensePlugin, { license: UNIVER_LICENSE }],
+          UniverSheetsChartPlugin,
+          UniverSheetsChartUIPlugin,
+        ],
       })
       runtime.univerAPI.createWorkbook(normalizeWorkbookSnapshot(snapshot ?? workbookData(operation)))
       runtimeRef.current = Object.assign(runtime, { mount })
@@ -1274,6 +1480,37 @@ function SheetProductView(props: ConvViewProps) {
   )
 }
 
+async function captureRenderedDocument(runtime: MountedRuntime): Promise<{ dataUrl: string; width: number; height: number }> {
+  window.dispatchEvent(new Event('resize'))
+  if (document.fonts?.ready !== undefined) await document.fonts.ready
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
+  await waitForAnimationFrames(3)
+
+  const candidates = [...runtime.mount.querySelectorAll('canvas')].map((canvas) => ({
+    canvas,
+    rect: canvas.getBoundingClientRect(),
+  })).filter(({ canvas, rect }) => canvas.width >= 200 && canvas.height >= 200 && rect.width >= 240 && rect.height >= 240)
+  if (candidates.length === 0) throw new Error('没有找到已渲染的文档画布')
+  const primary = candidates.sort((left, right) => right.rect.width * right.rect.height - left.rect.width * left.rect.height)[0]!
+  const layers = candidates.filter(({ rect }) => (
+    Math.abs(rect.left - primary.rect.left) <= 2
+    && Math.abs(rect.top - primary.rect.top) <= 2
+    && Math.abs(rect.width - primary.rect.width) <= 2
+    && Math.abs(rect.height - primary.rect.height) <= 2
+  ))
+  const outputWidth = Math.max(1, Math.min(1600, Math.round(primary.rect.width * Math.min(window.devicePixelRatio || 1, 2))))
+  const outputHeight = Math.max(1, Math.round(outputWidth * primary.rect.height / primary.rect.width))
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = outputWidth
+  outputCanvas.height = outputHeight
+  const context = outputCanvas.getContext('2d')
+  if (context === null) throw new Error('浏览器无法创建文档截图画布')
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, outputWidth, outputHeight)
+  for (const { canvas } of layers) context.drawImage(canvas, 0, 0, outputWidth, outputHeight)
+  return { dataUrl: outputCanvas.toDataURL('image/png'), width: outputWidth, height: outputHeight }
+}
+
 const openedDocumentSessions = new Set<string>()
 
 function DocProductView(props: ConvViewProps) {
@@ -1304,6 +1541,8 @@ function DocProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  const docScreenshotInFlightRef = useRef(new Set<string>())
+  useUniverCodeExecutor(sessionId, 'doc', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
   useLayoutEffect(() => {
@@ -1391,7 +1630,10 @@ function DocProductView(props: ConvViewProps) {
           UniverDocsCorePreset({ container: mount }),
           UniverDocsDrawingPreset(),
         ],
-        plugins: [[UniverLicensePlugin, { license: UNIVER_LICENSE }]],
+        plugins: [
+          [UniverLicensePlugin, { license: UNIVER_LICENSE }],
+          UniverDocsTablePlugin,
+        ],
       })
       const fDocument = runtime.univerAPI.createDocument((restoredSnapshot ?? documentData(operation)) as any)
       if (restoredSnapshot === undefined && operation?.text) fDocument.insertText(0, operation.text)
@@ -1496,6 +1738,51 @@ function DocProductView(props: ConvViewProps) {
     }, 800)
     return () => window.clearInterval(timer)
   }, [sessionId])
+
+  useEffect(() => {
+    let disposed = false
+    let polling = false
+    const poll = async () => {
+      if (!hostLoaded || !documentVisible || polling) return
+      polling = true
+      try {
+        const connection = clientConnection.current
+        if (connection === null) return
+        const response = await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-requests', { sessionId })
+        if (!response.ok || disposed || !Array.isArray(response.value)) return
+        for (const rawRequest of response.value) {
+          if (rawRequest === null || typeof rawRequest !== 'object') continue
+          const request = rawRequest as Partial<DocScreenshotRequest>
+          if (typeof request.id !== 'string' || (request.mode !== 'document' && request.mode !== 'editor')) continue
+          if (docScreenshotInFlightRef.current.has(request.id)) continue
+          docScreenshotInFlightRef.current.add(request.id)
+          try {
+            const runtime = runtimeRef.current
+            if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Doc')
+            const captured = await captureRenderedDocument(runtime)
+            await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', { sessionId, screenshotId: request.id, ...captured })
+          } catch (reason) {
+            await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', {
+              sessionId,
+              screenshotId: request.id,
+              error: reason instanceof Error ? reason.message : String(reason),
+            }).catch(() => {})
+          } finally {
+            docScreenshotInFlightRef.current.delete(request.id)
+          }
+        }
+      } finally {
+        polling = false
+      }
+    }
+    void poll().catch(() => {})
+    const timer = window.setInterval(() => void poll().catch(() => {}), 1000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      docScreenshotInFlightRef.current.clear()
+    }
+  }, [sessionId, hostLoaded, documentVisible])
 
   useLayoutEffect(() => () => {
     const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
@@ -1789,6 +2076,7 @@ function SlideProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  useUniverCodeExecutor(sessionId, 'slide', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const screenshotInFlightRef = useRef(new Set<string>())
   const slideResizeTimersRef = useRef<number[]>([])
   const [layoutVersion, setLayoutVersion] = useState(0)
@@ -1811,6 +2099,14 @@ function SlideProductView(props: ConvViewProps) {
       observer.disconnect()
       window.cancelAnimationFrame(frame)
     }
+  }, [])
+
+  useLayoutEffect(() => {
+    const container = containerRef.current
+    if (container === null) return
+    // Confine Univer's presentation `scrollIntoView`/`focus` calls to this tab;
+    // see scroll-containment.js for the full mechanism.
+    return installScrollContainment(container)
   }, [])
 
   useEffect(() => {
@@ -2363,6 +2659,12 @@ function UniverView(props: ConvViewProps) {
     for (let index = nodes.length - 1; index >= 0; index -= 1) {
       const node = nodes[index]!
       if (node.kind !== 'tool-result' || node.call === null) continue
+      if (node.call.name === 'univer_execute_code') {
+        try {
+          const args = JSON.parse(node.call.argsRaw) as { unitType?: unknown }
+          if (args.unitType === 'sheet' || args.unitType === 'doc' || args.unitType === 'slide') return args.unitType
+        } catch {}
+      }
       if (SLIDE_TOOL_NAMES.has(node.call.name)) return 'slide'
       if (DOC_TOOL_NAMES.has(node.call.name)) return 'doc'
       if (SHEET_TOOL_NAMES.has(node.call.name)) return 'sheet'
@@ -2370,6 +2672,31 @@ function UniverView(props: ConvViewProps) {
     return 'sheet'
   }, [nodes])
   const [unitType, setUnitType] = useState<UniverUnitType>(() => selectedUnitBySession.get(props.sessionId) ?? suggestedUnit)
+
+  useEffect(() => {
+    let disposed = false
+    const selectPendingCodeTarget = async () => {
+      const connection = clientConnection.current
+      if (connection === null) return
+      const response = await connection.rpc.call('/dsh-univer-create', 'univer-code-target', { sessionId: props.sessionId })
+      if (!response.ok || disposed || !Array.isArray(response.value)) return
+      const request = response.value.find((item: unknown) => item !== null && typeof item === 'object' && (
+        (item as { unitType?: unknown }).unitType === 'sheet'
+        || (item as { unitType?: unknown }).unitType === 'doc'
+        || (item as { unitType?: unknown }).unitType === 'slide'
+      )) as { unitType?: UniverUnitType } | undefined
+      if (request?.unitType !== undefined) {
+        selectedUnitBySession.set(props.sessionId, request.unitType)
+        setUnitType(request.unitType)
+      }
+    }
+    void selectPendingCodeTarget().catch(() => {})
+    const timer = window.setInterval(() => void selectPendingCodeTarget().catch(() => {}), 300)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [props.sessionId])
 
   useEffect(() => {
     const remembered = selectedUnitBySession.get(props.sessionId)

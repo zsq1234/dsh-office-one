@@ -1,4 +1,10 @@
+import ChartUIZhCN from '@univerjs-pro/chart-ui/locale/zh-CN'
 import { UniverLicensePlugin } from '@univerjs-pro/license'
+import { UniverSheetsChartPlugin } from '@univerjs-pro/sheets-chart'
+import { UniverSheetsChartUIPlugin } from '@univerjs-pro/sheets-chart-ui'
+import SheetsChartUIZhCN from '@univerjs-pro/sheets-chart-ui/locale/zh-CN'
+import { UniverSheetsPrintPlugin } from '@univerjs-pro/sheets-print'
+import SheetsPrintZhCN from '@univerjs-pro/sheets-print/locale/zh-CN'
 import { CommandType, LocaleType, mergeLocales, Univer, UniverInstanceType } from '@univerjs/core'
 import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import { FUniver } from '@univerjs/core/facade'
@@ -49,6 +55,9 @@ import { UniverUIPlugin } from '@univerjs/ui'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
 
 import '@univerjs/sheets/facade'
+import '@univerjs-pro/engine-chart/facade'
+import '@univerjs-pro/chart-ui/facade'
+import '@univerjs-pro/sheets-chart/facade'
 import { isPersistableWorkbookMutation } from '../workbook-drafts.js'
 import '../styles.css'
 
@@ -70,6 +79,9 @@ import '@univerjs/sheets-note-ui/lib/index.css'
 import '@univerjs/sheets-table-ui/lib/index.css'
 import '@univerjs/thread-comment-ui/lib/index.css'
 import '@univerjs/sheets-crosshair-highlight/lib/index.css'
+import '@univerjs-pro/chart-ui/lib/index.css'
+import '@univerjs-pro/sheets-chart-ui/lib/index.css'
+import '@univerjs-pro/sheets-print/lib/index.css'
 
 export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
   const univer = new Univer({
@@ -96,6 +108,9 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
         SheetsHyperLinkUIZhCN,
         SheetsTableUIZhCN,
         SheetsCrosshairHighlightZhCN,
+        ChartUIZhCN,
+        SheetsChartUIZhCN,
+        SheetsPrintZhCN,
       ),
     },
   })
@@ -126,6 +141,9 @@ export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
   univer.registerPlugin(UniverSheetsTableUIPlugin)
   univer.registerPlugin(UniverSheetsNoteUIPlugin)
   univer.registerPlugin(UniverSheetsCrosshairHighlightPlugin)
+  univer.registerPlugin(UniverSheetsChartPlugin)
+  univer.registerPlugin(UniverSheetsChartUIPlugin)
+  univer.registerPlugin(UniverSheetsPrintPlugin)
 
   univer.createUnit(UniverInstanceType.UNIVER_SHEET, snapshot as never)
 

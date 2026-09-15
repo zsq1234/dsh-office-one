@@ -2,7 +2,7 @@
 
 把以下三个功能作为一个 DSH Bundle、一个 Host entry 和一个 Client bundle 安装：
 
-- `univer-create`：对话中的 Sheet、Doc、Slide 编辑器和模型工具；Slide 支持把浏览器实际渲染画布截图返回给视觉模型做排版自检。
+- `univer-create`：对话中的 Sheet、Doc、Slide 编辑器和模型工具；支持查询版本匹配的 Univer Facade API 参考，并按当前 DSH 权限预设让模型对浏览器中的 `univerAPI` 执行 JavaScript；Sheet 已启用 Chart Facade 和图表渲染/UI，Slide 还支持把浏览器实际渲染画布截图返回给视觉模型做排版自检。
 - `univer-file-export`：基于 Univer Exchange Node 的 Office 导入/导出服务。
 - `workspace-file-viewer`：为 DSH 自带的 Workspace 文件列表增加 Office 文件打开、编辑和保存支持。
 

@@ -116,6 +116,8 @@ Doc 工具支持的主要能力包括：
 - 读取和替换全部纯文本。
 - 按零起始字符位置插入、追加或删除文本。
 - 对指定字符范围设置粗体、斜体、字号和文字颜色。
+- 使用 `univer_doc_screenshot` 截取当前文档可视区域的真实 Univer Canvas，返回给支持图片输入的模型检查标题层级、间距、裁切、对齐和页面留白。
+- 代码执行器可通过已注册的 Docs Table Facade 使用 `insertTable`、`insertTableFromData`、`getTables`、`findTableByText`，并从 `univerAPI.Enum.DocsTableInsertTablePosition` 获取插入位置枚举。
 
 字符范围采用零起始、左闭右开形式。例如 `start=0, end=5` 表示前 5 个字符。
 
@@ -155,6 +157,41 @@ Slide 工具支持的主要能力包括：
 更新或删除元素前，应先让 AI 列出当前幻灯片，取得正确的元素 ID。完成一页或一轮排版后，可让 AI 调用 `univer_slide_screenshot` 做视觉自检，再根据截图继续调整。
 
 截图由浏览器中的 Slide 页面执行，因此调用截图工具时必须保持当前会话的 **Univer → Slide** 页签打开；如果页面未挂载或 15 秒内没有返回渲染结果，工具会明确报错。默认 `mode=slide` 只读取 Univer 画布，不包含工具栏和对话浮层。
+
+### 使用 Facade API 参考与 JavaScript 执行器
+
+当固定的 Sheet、Doc、Slide 工具无法表达复杂批量操作时，可以让 AI 使用以下两个工具：
+
+- `univer_api_reference`：查询与插件匹配的 Univer Facade API。推荐先用 `action=find` 和关键词发现 API，再用 `action=show` 查看准确签名、示例、空值约束和相关类型。
+- `univer_execute_code`：在当前会话的浏览器页面执行 JavaScript。执行环境只注入 `univerAPI`（`FUniver` Facade）和受控 `console`；代码应通过 `univerAPI.getActiveWorkbook()`、`getActiveDocument()` 或 `getActivePresentation()` 获取当前对象。
+
+推荐对 AI 这样描述：
+
+```text
+先查询 FRange.setValues 和 FRange.setBackground 的 Facade API，再在当前 Sheet 中用 JavaScript 批量生成 100 行数据并设置表头格式。只使用 univerAPI，最后 return 一个结果摘要。
+```
+
+执行器支持普通 JavaScript、循环和 `await`，代码中的 `return` 值及 `console` 输出会返回给 AI。不要写 TypeScript 类型、`import`、DOM 操作、网络请求、浏览器存储访问、Univer injector/model 或其他内部 API。枚举优先从 `univerAPI.Enum` 获取。
+
+Sheet 运行时已注册完整的 Chart 模型、渲染/UI 插件与 Facade mixin。代码执行器和 Workspace 表格编辑器均可使用 `FWorksheet.newChart()`、`insertChart()`、`getChart()`、`getCharts()`，以及图表 builder、实时 `FChart` 操作和 `exportImage()`；图表类型和数据方向可从 `univerAPI.Enum.ChartTypeString`、`ChartSourceOrientation` 等枚举获取。调用前仍应先用 `univer_api_reference` 查询具体签名。
+
+代码执行完成后，插件会立即保存当前 Univer 快照。目标 Sheet、Doc 或 Slide 必须已经创建，并保持当前会话的 **Univer** 页签打开；收到执行请求时界面会自动切换到目标产品。
+
+需要检查 AI 实际生成的代码时，可以在浏览器开发者工具 Console 中开启调试：
+
+```js
+window.__DSH_UNIVER_CODE_DEBUG__ = true
+```
+
+之后每次已领取的 `univer_execute_code` 请求都会以 `[dsh-univer]` 分组打印目标类型、请求 ID 和完整代码，包括随后被静态规则拒绝的代码。关闭调试：
+
+```js
+window.__DSH_UNIVER_CODE_DEBUG__ = false
+```
+
+调试开关只保存在当前页面的 JavaScript 生命周期中，刷新页面后需要重新设置；代码可能包含敏感业务数据，不建议在共享屏幕或生产环境长期打开。
+
+`univer_execute_code` 会执行模型生成的同页面代码，并遵循当前会话的 DSH 权限预设：选择 **Ask / Workspace Write** 时每次执行都会请求用户批准；选择 **Full Access**（approval policy 为 `never`）时不再发起审批，代码会自动执行，也不会要求切换回“每次询问”。它是受约束的可信代码执行能力，不是强隔离安全沙箱：代码与 DSH 页面处于同一个 JavaScript realm，静态规则只能阻止常见的 DOM、网络和存储写法，不能作为不可绕过的权限边界。异步等待有 10 秒超时，但已启动的代码无法被真正终止，同步死循环也无法由同一 UI 线程强制中断；抛错或超时前已经完成的修改还可能被自动保存。Full Access 下不会出现最后一次人工复核，只应在你愿意信任自动生成代码时使用。
 
 ## 使用 Workspace 文件列表
 

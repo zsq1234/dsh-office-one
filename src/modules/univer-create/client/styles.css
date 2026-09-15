@@ -225,6 +225,11 @@
 .dsh-univer-create-container--slides {
   contain: layout paint;
   isolation: isolate;
+  /* The presentation footer calls scrollIntoView when the active slide changes.
+     Make the local Slides host the nearest scroll container so that call cannot
+     propagate to the DSH page and move the whole application horizontally. */
+  overflow: hidden;
+  overscroll-behavior: contain;
   transform: translateZ(0);
 }
 
