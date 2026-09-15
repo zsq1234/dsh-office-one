@@ -185,7 +185,7 @@ export default defineConfig([
     name: `${PACKAGE_ID}/sheet-runtime`,
     entry: { sheet: 'src/modules/workspace-file-viewer/client/runtimes/sheet.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', /^@univerjs-pro\//, /^@univerjs\//],
     plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/sheet.js',
@@ -201,7 +201,7 @@ export default defineConfig([
     name: `${PACKAGE_ID}/docs-runtime`,
     entry: { docs: 'src/modules/workspace-file-viewer/client/runtimes/docs.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/docs-table', '@univerjs-pro/docs-table/facade', '@univerjs-pro/slides', '@univerjs-pro/slides-ui', /^@univerjs\//],
     plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/docs.js',
@@ -217,7 +217,7 @@ export default defineConfig([
     name: `${PACKAGE_ID}/slides-runtime`,
     entry: { slides: 'src/modules/workspace-file-viewer/client/runtimes/slides.ts' },
     external: [/^@deepseek-ai\//],
-    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/shape-editor-ui', '@univerjs-pro/shape-editor-ui/locale/zh-CN', '@univerjs-pro/slides', '@univerjs-pro/slides/facade', '@univerjs-pro/slides-ui', '@univerjs-pro/slides-ui/locale/zh-CN', '@univerjs-pro/engine-shape', '@univerjs-pro/engine-shape/facade', '@univerjs-pro/engine-formula', /^@univerjs\//],
+    noExternal: ['react', 'react-dom', 'react/jsx-runtime', 'react-dom/client', '@wendellhu/redi', '@wendellhu/redi/react-bindings', 'rxjs', 'rxjs/operators', '@univerjs-pro/license', '@univerjs-pro/shape-editor-ui', '@univerjs-pro/shape-editor-ui/locale/zh-CN', '@univerjs-pro/slides', '@univerjs-pro/slides/facade', '@univerjs-pro/slides-ui', '@univerjs-pro/slides-ui/locale/zh-CN', '@univerjs-pro/engine-shape', '@univerjs-pro/engine-shape/facade', '@univerjs-pro/engine-chart', '@univerjs-pro/engine-formula', /^@univerjs\//],
     plugins: [dedupeRediPlugin(), runtimeDependencyPlugin(), univerLicensePlugin(), cssPlugin()],
     outputOptions: {
       entryFileNames: 'runtimes/slides.js',

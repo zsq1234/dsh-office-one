@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createStandardApiReference } from '@univer-cli/api-reference'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { chmod, lstat, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -28,12 +29,33 @@ interface SlideScreenshotRequest {
   createdAt: number
 }
 
+interface DocScreenshotRequest {
+  id: string
+  mode: 'document' | 'editor'
+  createdAt: number
+}
+
 interface SlideScreenshotResult {
   dataUrl?: string
   width?: number
   height?: number
   error?: string
 }
+
+interface UniverCodeRequest {
+  id: string
+  unitType: 'sheet' | 'doc' | 'slide'
+  code: string
+  createdAt: number
+  claimedBy?: string
+}
+
+interface UniverCodeResult {
+  result?: string
+  logs?: string[]
+  error?: string
+}
+
 const workbookDomainSpec = defineDomain({
   name: 'dsh_univer_sheet',
   version: 1,
@@ -316,7 +338,12 @@ export function apply(ctx: Context): void {
   const workbookUpdateLocks = new Map<string, Promise<void>>()
   const slideScreenshotRequests = new Map<string, Map<string, SlideScreenshotRequest>>()
   const slideScreenshotResults = new Map<string, SlideScreenshotResult>()
+  const docScreenshotRequests = new Map<string, Map<string, DocScreenshotRequest>>()
+  const docScreenshotResults = new Map<string, SlideScreenshotResult>()
+  const univerCodeRequests = new Map<string, Map<string, UniverCodeRequest>>()
+  const univerCodeResults = new Map<string, UniverCodeResult>()
   const activeSlideSessions = new Set<string>()
+  const apiReference = createStandardApiReference()
   const requireActiveSlide = (sessionId: string) => {
     if (!activeSlideSessions.has(sessionId)) {
       throw new Error('请先打开当前会话的 Univer → Slide 页面，再调用 Slide 工具')
@@ -416,9 +443,13 @@ export function apply(ctx: Context): void {
         overwrite?: unknown
         operationIds?: unknown
         screenshotId?: unknown
+        codeRequestId?: unknown
+        clientId?: unknown
         dataUrl?: unknown
         width?: unknown
         height?: unknown
+        result?: unknown
+        logs?: unknown
         error?: unknown
         active?: unknown
       }
@@ -444,10 +475,76 @@ export function apply(ctx: Context): void {
       if (endpoint === 'sheet-operations') {
         return { ok: true, value: table.get(request.sessionId)?.queuedSheetOperations ?? [] }
       }
+      if (endpoint === 'univer-code-target') {
+        return { ok: true, value: [...(univerCodeRequests.get(request.sessionId)?.values() ?? [])].map(({ id, unitType }) => ({ id, unitType })) }
+      }
+      if (endpoint === 'univer-code-requests') {
+        const requests = [...(univerCodeRequests.get(request.sessionId)?.values() ?? [])].filter((item) => item.claimedBy === undefined)
+        return { ok: true, value: request.unitType === undefined ? requests : requests.filter((item) => item.unitType === request.unitType) }
+      }
+      if (endpoint === 'univer-code-claim') {
+        if (typeof request.codeRequestId !== 'string' || typeof request.clientId !== 'string') {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'codeRequestId and clientId are required', details: {} } } as any
+        }
+        const pending = univerCodeRequests.get(request.sessionId)
+        const codeRequest = pending?.get(request.codeRequestId)
+        if (codeRequest === undefined || codeRequest.claimedBy !== undefined) return { ok: true, value: null }
+        codeRequest.claimedBy = request.clientId
+        return { ok: true, value: codeRequest }
+      }
+      if (endpoint === 'univer-code-result') {
+        if (typeof request.codeRequestId !== 'string' || typeof request.clientId !== 'string') {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'codeRequestId and clientId are required', details: {} } } as any
+        }
+        const pending = univerCodeRequests.get(request.sessionId)
+        const codeRequest = pending?.get(request.codeRequestId)
+        if (pending === undefined || codeRequest === undefined) {
+          return { ok: false, error: { code: 'not-found', message: 'code request is no longer pending', details: {} } } as any
+        }
+        if (codeRequest.claimedBy !== request.clientId) {
+          return { ok: false, error: { code: 'forbidden', message: 'code request belongs to another browser client', details: {} } } as any
+        }
+        const logs = Array.isArray(request.logs)
+          ? request.logs.filter((item): item is string => typeof item === 'string').slice(0, 200)
+          : []
+        const result: UniverCodeResult = typeof request.error === 'string'
+          ? { error: request.error, logs }
+          : { result: typeof request.result === 'string' ? request.result : 'undefined', logs }
+        univerCodeResults.set(request.codeRequestId, result)
+        pending.delete(request.codeRequestId)
+        if (pending.size === 0) univerCodeRequests.delete(request.sessionId)
+        return { ok: true, value: { accepted: true } }
+      }
       if (endpoint === 'slide-runtime-heartbeat') {
         if (request.active === true) activeSlideSessions.add(request.sessionId)
         else activeSlideSessions.delete(request.sessionId)
         return { ok: true, value: { active: activeSlideSessions.has(request.sessionId) } }
+      }
+      if (endpoint === 'doc-screenshot-requests') {
+        return { ok: true, value: [...(docScreenshotRequests.get(request.sessionId)?.values() ?? [])] }
+      }
+      if (endpoint === 'doc-screenshot-result') {
+        if (typeof request.screenshotId !== 'string') {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'screenshotId is required', details: {} } } as any
+        }
+        const pending = docScreenshotRequests.get(request.sessionId)
+        if (!pending?.has(request.screenshotId)) {
+          return { ok: false, error: { code: 'not-found', message: 'document screenshot request is no longer pending', details: {} } } as any
+        }
+        const result: SlideScreenshotResult = typeof request.error === 'string'
+          ? { error: request.error }
+          : {
+              dataUrl: typeof request.dataUrl === 'string' ? request.dataUrl : undefined,
+              width: typeof request.width === 'number' ? request.width : undefined,
+              height: typeof request.height === 'number' ? request.height : undefined,
+            }
+        if (result.error === undefined && (result.dataUrl === undefined || result.width === undefined || result.height === undefined)) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'dataUrl, width, and height are required', details: {} } } as any
+        }
+        docScreenshotResults.set(request.screenshotId, result)
+        pending.delete(request.screenshotId)
+        if (pending.size === 0) docScreenshotRequests.delete(request.sessionId)
+        return { ok: true, value: { accepted: true } }
       }
       if (endpoint === 'slide-screenshot-requests') {
         return { ok: true, value: [...(slideScreenshotRequests.get(request.sessionId)?.values() ?? [])] }
@@ -550,6 +647,133 @@ export function apply(ctx: Context): void {
     await unregister?.()
     await close()
   }, 'dsh-univer-create: host persistence')
+
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.name !== 'univer_execute_code') return next()
+    const approval = ctx.get('approval') as undefined | {
+      config: { policy?: 'ask' | 'never' }
+      overrideOf: (session: unknown) => 'ask' | 'never' | undefined
+    }
+    const policy = exec.agent === undefined
+      ? approval?.config.policy
+      : approval?.overrideOf(exec.agent.session) ?? approval?.config.policy
+    if (policy === 'never') return next()
+    return {
+      kind: 'ask',
+      reason: 'This runs AI-generated JavaScript in the DSH page realm. It is not a security sandbox: review the code because same-page JavaScript may affect the editor or page data.',
+    }
+  })
+
+  ctx.tools.register(defineTool({
+    name: 'univer_api_reference',
+    description: 'Search the version-matched Univer Facade API reference before writing browser code. Use action=find with API-name keywords, then action=show with returned symbols to inspect exact signatures, examples, nullability, and related types.',
+    parameters: {
+      action: { type: 'string', enum: ['find', 'show'], required: true, description: 'find discovers symbols; show returns exact symbol details.' },
+      terms: { type: 'array', items: { type: 'string' }, description: 'Non-empty search terms for action=find.' },
+      symbols: { type: 'array', items: { type: 'string' }, description: 'Exact symbols for action=show, for example FRange.setValues.' },
+      unit: { type: 'string', enum: ['sheet', 'slide', 'doc', 'base', 'board'], description: 'Optional unit filter for action=find.' },
+      limit: { type: 'integer', description: 'Positive result limit per term for action=find. Defaults to 10.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          response: { type: 'string', required: true },
+        },
+        additionalProperties: false,
+      } as const,
+      render: (_args: unknown, value: { response: string }) => [{ type: 'text' as const, text: value.response }],
+    },
+    async execute(args) {
+      if (args.action === 'find' && (!Array.isArray(args.terms) || args.terms.length === 0)) throw new Error('action=find requires at least one term')
+      if (args.action === 'show' && (!Array.isArray(args.symbols) || args.symbols.length === 0)) throw new Error('action=show requires at least one symbol')
+      if ((args.terms?.length ?? 0) > 10 || (args.symbols?.length ?? 0) > 10) throw new Error('a reference query accepts at most 10 terms or symbols')
+      if ([...(args.terms ?? []), ...(args.symbols ?? [])].some((item) => item.length > 200)) throw new Error('reference terms and symbols are limited to 200 characters')
+      if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit <= 0 || args.limit > 50)) throw new Error('limit must be an integer between 1 and 50')
+      const response = args.action === 'find'
+        ? apiReference.find({
+            terms: args.terms!,
+            ...(args.unit === undefined ? {} : { unit: args.unit }),
+            limit: args.limit ?? 10,
+          })
+        : apiReference.show(args.symbols!)
+      const serialized = JSON.stringify(response, null, 2)
+      return {
+        ok: true,
+        action: args.action,
+        response: serialized.length > 100_000 ? `${serialized.slice(0, 100_000)}\n…[truncated; query fewer symbols]` : serialized,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'univer_execute_code',
+    description: 'Execute JavaScript against the active Univer editor in this conversation browser. First query univer_api_reference. The supported contract injects only `univerAPI` (FUniver Facade) and a captured `console`; obtain objects through getActiveWorkbook(), getActiveDocument(), or getActivePresentation(). Do not use imports, DOM/browser globals, raw Univer internals, injector/model access, or TypeScript syntax. Async code and await are supported. Return a JSON-serializable value for inspection. The target Univer tab must be open and the requested unit must already exist. This is trusted same-page execution, not a security sandbox. Under the Ask permission preset it requests approval; under Full Access it executes automatically.',
+    parameters: {
+      unitType: { type: 'string', enum: ['sheet', 'doc', 'slide'], required: true, description: 'Target active Univer unit.' },
+      code: { type: 'string', required: true, description: 'JavaScript function body. `univerAPI` is the only injected Univer binding. Use `return` to send a result back.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          unitType: { type: 'string', required: true },
+          result: { type: 'string', required: true },
+          logs: { type: 'array', items: { type: 'string' }, required: true },
+        },
+        additionalProperties: false,
+      } as const,
+      render: (_args: unknown, value: { unitType: string; result: string; logs: string[] }) => [{
+        type: 'text' as const,
+        text: `${value.unitType} code result:\n${value.result}${value.logs.length > 0 ? `\nconsole:\n${value.logs.join('\n')}` : ''}`,
+      }],
+    },
+    timeoutMs: 40_000,
+    async execute(args, exec) {
+      if (isSubagent(exec.agent)) throw new Error('univer_execute_code 只能由有可见 Univer 页面的主会话调用，不能由子代理调用')
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能执行 Univer 代码')
+      if (args.code.trim().length === 0) throw new Error('code must not be empty')
+      if (args.code.length > 50_000) throw new Error('code exceeds the 50000 character limit')
+      const request: UniverCodeRequest = {
+        id: randomUUID(),
+        unitType: args.unitType,
+        code: args.code,
+        createdAt: Date.now(),
+      }
+      const pending = univerCodeRequests.get(sessionId) ?? new Map<string, UniverCodeRequest>()
+      pending.set(request.id, request)
+      univerCodeRequests.set(sessionId, pending)
+
+      const deadline = Date.now() + 30_000
+      let result: UniverCodeResult | undefined
+      try {
+        while (Date.now() < deadline) {
+          if (exec.signal.aborted) throw exec.signal.reason ?? new Error('Univer code execution was cancelled')
+          result = univerCodeResults.get(request.id)
+          if (result !== undefined) break
+          await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
+        }
+      } finally {
+        univerCodeRequests.get(sessionId)?.delete(request.id)
+        if (univerCodeRequests.get(sessionId)?.size === 0) univerCodeRequests.delete(sessionId)
+        univerCodeResults.delete(request.id)
+      }
+      if (result === undefined) throw new Error('浏览器执行超时。请保持当前会话的 Univer 页签打开，并确认目标文档已创建。')
+      if (result.error !== undefined) throw new Error(`浏览器执行失败：${result.error}${result.logs?.length ? `\n${result.logs.join('\n')}` : ''}`)
+      return {
+        ok: true,
+        action: 'execute-code',
+        unitType: args.unitType,
+        result: result.result ?? 'undefined',
+        logs: result.logs ?? [],
+      }
+    },
+  }))
 
   ctx.tools.register(defineTool({
     name: 'univer_sheet_new',
@@ -870,6 +1094,90 @@ export function apply(ctx: Context): void {
     output,
     async execute(args) {
       return { ok: true, action: 'format-doc-text', message: `已设置文档文本范围 [${args.start}, ${args.end}) 的格式。` }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'univer_doc_screenshot',
+    description: 'Capture the currently rendered Univer document viewport as a PNG and return it to the model for visual inspection. Use after editing to check hierarchy, spacing, clipping, and page layout. The Univer Doc tab must be initialized in the browser.',
+    parameters: {
+      mode: { type: 'string', enum: ['document', 'editor'], description: 'document returns the rendered document canvas; editor is reserved for editor diagnostics. Defaults to document.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          message: { type: 'string', required: true },
+          image: imageValueSchema,
+        },
+      } as const,
+      render: (_args: unknown, value: { message: string; image: ScreenshotImageValue }) => [{
+        type: 'text' as const,
+        text: value.message,
+      }, {
+        type: 'image' as const,
+        attachment: {
+          attachmentId: value.image.attachmentId,
+          mediaType: value.image.mediaType,
+          bytes: value.image.bytes,
+          width: value.image.width,
+          height: value.image.height,
+          ...(value.image.name === undefined ? {} : { name: value.image.name }),
+        } as any,
+      }],
+    },
+    async execute(args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取文档')
+      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:doc`)
+      if (stored?.snapshot === null || stored?.snapshot === undefined) {
+        throw new Error('当前没有已创建或已打开的文档；请先在 Univer → Doc 中点击“新建”或“打开”')
+      }
+      const request: DocScreenshotRequest = { id: randomUUID(), mode: args.mode ?? 'document', createdAt: Date.now() }
+      const pending = docScreenshotRequests.get(sessionId) ?? new Map<string, DocScreenshotRequest>()
+      pending.set(request.id, request)
+      docScreenshotRequests.set(sessionId, pending)
+
+      const deadline = Date.now() + 15_000
+      let result: SlideScreenshotResult | undefined
+      try {
+        while (Date.now() < deadline) {
+          if (exec.signal.aborted) throw exec.signal.reason
+          result = docScreenshotResults.get(request.id)
+          if (result !== undefined) break
+          await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
+        }
+      } finally {
+        docScreenshotRequests.get(sessionId)?.delete(request.id)
+        if (docScreenshotRequests.get(sessionId)?.size === 0) docScreenshotRequests.delete(sessionId)
+        docScreenshotResults.delete(request.id)
+      }
+      if (result === undefined) throw new Error('文档截图超时。请打开当前会话的 Univer → Doc 页签后重试。')
+      if (result.error !== undefined) throw new Error(`浏览器文档截图失败：${result.error}`)
+      const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
+      if (match === null) throw new Error('浏览器返回的文档截图不是有效 PNG data URL')
+      const data = Buffer.from(match[1]!, 'base64')
+      if (data.byteLength === 0 || data.byteLength > 20 * 1024 * 1024) throw new Error('文档截图大小无效或超过 20 MiB')
+      const attachments = (ctx as Context & { attachments?: { saveImage: (input: { data: Uint8Array; mediaType: 'image/png'; name?: string }) => Promise<any> } }).attachments
+      if (attachments === undefined) throw new Error('当前 DSH 未挂载附件服务，无法把文档截图返回给模型')
+      const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: 'document-viewport.png' })
+      const image: ScreenshotImageValue = {
+        attachmentId: String(ref.attachmentId),
+        mediaType: 'image/png',
+        bytes: ref.bytes,
+        width: ref.width,
+        height: ref.height,
+        ...(ref.name === undefined ? {} : { name: ref.name }),
+      }
+      return {
+        ok: true,
+        action: 'doc-screenshot',
+        message: `当前文档可视区域截图（${image.width}×${image.height}）。请检查标题层级、间距、裁切、对齐和页面留白。`,
+        image,
+      }
     },
   }))
 
