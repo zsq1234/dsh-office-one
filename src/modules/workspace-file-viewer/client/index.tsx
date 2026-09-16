@@ -17,6 +17,7 @@ import 'prismjs/components/prism-yaml'
 import 'prismjs/components/prism-markdown'
 
 import { MarkdownPreview, isMarkdown, canPreviewMarkdown } from './markdown.js'
+import { type DshLanguage, useDshLanguage } from '../../../dsh-language.js'
 import {
   appendWorkbookMutation,
   clearWorkbookDraft,
@@ -46,21 +47,25 @@ type DirectoryState = {
 }
 
 type SaveableUnit = { save?: () => unknown; getSnapshot?: () => unknown }
-type Disposable = { dispose: () => void }
+type Disposable = { dispose: () => void; setLocale?: (locale: unknown) => void }
 type UniverSheetRuntime = {
   univer: Disposable
   workbook: SaveableUnit
   replayMutations: (mutations: WorkbookMutation[]) => Promise<void>
   onMutation: (listener: (mutation: WorkbookMutation) => void) => Disposable
 }
-type UniverDocumentRuntime = { univer: { dispose: () => void }; univerAPI: { createDocument: (snapshot: unknown) => SaveableUnit; getActiveDocument?: () => SaveableUnit | null } }
-type UniverSlidesRuntime = { dispose: () => void; createUnit: (type: unknown, snapshot: unknown) => SaveableUnit }
+type UniverDocumentRuntime = { univer: Disposable; univerAPI: { createDocument: (snapshot: unknown) => SaveableUnit; getActiveDocument?: () => SaveableUnit | null } }
+type UniverSlidesRuntime = Disposable & { createUnit: (type: unknown, snapshot: unknown) => SaveableUnit }
 type SnapshotProviderRef = React.MutableRefObject<(() => unknown | Promise<unknown>) | null>
 
-type RuntimeFactory = (container: HTMLElement) => UniverDocumentRuntime | UniverSlidesRuntime
+type RuntimeFactory = (container: HTMLElement, language: DshLanguage) => UniverDocumentRuntime | UniverSlidesRuntime
+
+function univerLocaleId(language: DshLanguage): 'enUS' | 'zhCN' {
+  return language === 'zh' ? 'zhCN' : 'enUS'
+}
 
 type RuntimeGlobal = {
-  createSheetRuntime?: (container: HTMLElement, snapshot: unknown) => UniverSheetRuntime
+  createSheetRuntime?: (container: HTMLElement, snapshot: unknown, language: DshLanguage) => UniverSheetRuntime
   createDocsRuntime?: RuntimeFactory
   createSlidesRuntime?: RuntimeFactory
   createSlide?: (runtime: UniverSlidesRuntime, snapshot: unknown) => unknown
@@ -207,6 +212,7 @@ function createSheetFrame(
   initialParent: HTMLElement,
   snapshot: unknown,
   draftMutations: WorkbookMutation[],
+  language: DshLanguage,
 ): SheetFrameEntry {
   const iframe = document.createElement('iframe')
   iframe.className = 'dsh-wfv-sheet-frame'
@@ -242,7 +248,7 @@ function createSheetFrame(
         try {
           const createSheetRuntime = frameWindow.__DSH_WORKSPACE_FILE_VIEWER__?.createSheetRuntime
           if (!createSheetRuntime) throw new Error('sheet runtime factory is unavailable')
-          const runtime = createSheetRuntime(mount, snapshot)
+          const runtime = createSheetRuntime(mount, snapshot, language)
           entry.runtime = runtime
           // Subscribe before replay so no user mutation can fall into the gap;
           // replay commands are already filtered by dshDraftReplay in runtime.
@@ -281,6 +287,7 @@ type CachedOfficeFrameEntry = {
   rejectReady: ((reason: unknown) => void) | null
   snapshotProvider: (() => unknown) | null
   disposeRuntime: (() => void) | null
+  setLocale: ((locale: 'enUS' | 'zhCN') => void) | null
   owner: symbol | null
   disposed: boolean
   lastUsed: number
@@ -357,6 +364,7 @@ function createOfficeFrame(
   sourceModified: string,
   initialParent: HTMLElement,
   snapshot: unknown,
+  language: DshLanguage,
 ): CachedOfficeFrameEntry {
   const iframe = document.createElement('iframe')
   iframe.className = `dsh-wfv-office-frame dsh-wfv-${kind}-frame`
@@ -373,6 +381,7 @@ function createOfficeFrame(
     rejectReady: null,
     snapshotProvider: null,
     disposeRuntime: null,
+    setLocale: null,
     owner: null,
     disposed: false,
     lastUsed: Date.now(),
@@ -395,15 +404,17 @@ function createOfficeFrame(
           let snapshotProvider: () => unknown
           if (kind === 'docs') {
             if (!runtimeGlobal?.createDocsRuntime) throw new Error('docs runtime factory is unavailable')
-            const runtime = runtimeGlobal.createDocsRuntime(mount) as UniverDocumentRuntime
+            const runtime = runtimeGlobal.createDocsRuntime(mount, language) as UniverDocumentRuntime
             const documentUnit = runtime.univerAPI.createDocument(snapshot as any)
             entry.disposeRuntime = () => runtime.univer.dispose()
+            entry.setLocale = (locale) => runtime.univer.setLocale?.(locale)
             snapshotProvider = () => unitSnapshot(runtime.univerAPI.getActiveDocument?.() ?? documentUnit)
           } else {
             if (!runtimeGlobal?.createSlidesRuntime || !runtimeGlobal.createSlide) throw new Error('slides runtime factory is unavailable')
-            const runtime = runtimeGlobal.createSlidesRuntime(mount) as UniverSlidesRuntime
+            const runtime = runtimeGlobal.createSlidesRuntime(mount, language) as UniverSlidesRuntime
             const presentation = runtimeGlobal.createSlide(runtime, snapshot) as SaveableUnit
             entry.disposeRuntime = () => runtime.dispose()
+            entry.setLocale = (locale) => runtime.setLocale?.(locale)
             snapshotProvider = () => unitSnapshot(presentation)
           }
           if (entry.disposed) {
@@ -910,6 +921,7 @@ function UniverWorkbook({
   onDraftRestoreFailed?: (reason: unknown) => void
   editingDisabled?: boolean
 }) {
+  const language = useDshLanguage()
   const containerRef = useRef<HTMLDivElement>(null)
   const onDraftMutationRef = useRef(onDraftMutation)
   const onDraftRestoredRef = useRef(onDraftRestored)
@@ -964,6 +976,7 @@ function UniverWorkbook({
       container,
       snapshot,
       draftMutations,
+      language,
     )
     const reused = cached !== undefined
     entry.owner = owner
@@ -975,6 +988,7 @@ function UniverWorkbook({
     let cancelled = false
     void entry.ready.then((runtime) => {
       if (cancelled || entry.owner !== owner) return
+      runtime.univer.setLocale?.(univerLocaleId(language))
       snapshotProviderRef.current = () => unitSnapshot(runtime.workbook)
       if (entry.replayError !== null) onDraftRestoreFailedRef.current?.(entry.replayError)
       else if (draftMutations.length > 0) onDraftRestoredRef.current?.()
@@ -1010,7 +1024,7 @@ function UniverWorkbook({
       }
       trimSheetFrameCache()
     }
-  }, [runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef])
+  }, [runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef, language])
 
   return <div ref={containerRef} className="dsh-wfv-univer" aria-label="电子表格 Univer 预览" />
 }
@@ -1030,6 +1044,7 @@ function CachedOfficeUnit({
   snapshotProviderRef: SnapshotProviderRef
   editingDisabled?: boolean
 }) {
+  const language = useDshLanguage()
   const containerRef = useRef<HTMLDivElement>(null)
   const retryCountRef = useRef(0)
   const [layoutVersion, setLayoutVersion] = useState(0)
@@ -1097,6 +1112,7 @@ function CachedOfficeUnit({
       sourceModified,
       container,
       initialSnapshot,
+      language,
     )
     const reused = cached !== undefined
     entry.owner = owner
@@ -1109,6 +1125,7 @@ function CachedOfficeUnit({
     const resizeTimers: number[] = []
     void entry.ready.then((getSnapshot) => {
       if (cancelled || entry.owner !== owner) return
+      entry.setLocale?.(univerLocaleId(language))
       snapshotProviderRef.current = getSnapshot
       retryCountRef.current = 0
       entry.iframe.inert = false
@@ -1156,7 +1173,7 @@ function CachedOfficeUnit({
       }
       trimOfficeFrameCache(kind)
     }
-  }, [kind, runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef])
+  }, [kind, runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef, language])
 
   const className = kind === 'docs' ? 'dsh-wfv-univer-doc' : 'dsh-wfv-univer-slides'
   const label = kind === 'docs' ? 'DOC Univer 预览' : 'PPT Univer 预览'

@@ -1,57 +1,80 @@
+import ChartUIEnUS from '@univerjs-pro/chart-ui/locale/en-US'
 import ChartUIZhCN from '@univerjs-pro/chart-ui/locale/zh-CN'
 import { UniverLicensePlugin } from '@univerjs-pro/license'
 import { UniverSheetsChartPlugin } from '@univerjs-pro/sheets-chart'
 import { UniverSheetsChartUIPlugin } from '@univerjs-pro/sheets-chart-ui'
+import SheetsChartUIEnUS from '@univerjs-pro/sheets-chart-ui/locale/en-US'
 import SheetsChartUIZhCN from '@univerjs-pro/sheets-chart-ui/locale/zh-CN'
 import { UniverSheetsPrintPlugin } from '@univerjs-pro/sheets-print'
+import SheetsPrintEnUS from '@univerjs-pro/sheets-print/locale/en-US'
 import SheetsPrintZhCN from '@univerjs-pro/sheets-print/locale/zh-CN'
 import { CommandType, LocaleType, mergeLocales, Univer, UniverInstanceType } from '@univerjs/core'
 import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import { FUniver } from '@univerjs/core/facade'
+import DesignEnUS from '@univerjs/design/locale/en-US'
 import DesignZhCN from '@univerjs/design/locale/zh-CN'
 import { UniverDocsPlugin } from '@univerjs/docs'
 import { UniverDocsUIPlugin } from '@univerjs/docs-ui'
+import DocsUIEnUS from '@univerjs/docs-ui/locale/en-US'
 import DocsUIZhCN from '@univerjs/docs-ui/locale/zh-CN'
 import { UniverDrawingPlugin } from '@univerjs/drawing'
 import { UniverDrawingUIPlugin } from '@univerjs/drawing-ui'
+import DrawingUIEnUS from '@univerjs/drawing-ui/locale/en-US'
 import DrawingUIZhCN from '@univerjs/drawing-ui/locale/zh-CN'
 import { UniverFormulaEnginePlugin } from '@univerjs/engine-formula'
 import { UniverRenderEnginePlugin } from '@univerjs/engine-render'
+import FindReplaceEnUS from '@univerjs/find-replace/locale/en-US'
 import FindReplaceZhCN from '@univerjs/find-replace/locale/zh-CN'
 import { UniverSheetsPlugin } from '@univerjs/sheets'
+import SheetsEnUS from '@univerjs/sheets/locale/en-US'
 import SheetsZhCN from '@univerjs/sheets/locale/zh-CN'
 import { UniverSheetsConditionalFormattingUIPlugin } from '@univerjs/sheets-conditional-formatting-ui'
+import SheetsConditionalFormattingUIEnUS from '@univerjs/sheets-conditional-formatting-ui/locale/en-US'
 import SheetsConditionalFormattingUIZhCN from '@univerjs/sheets-conditional-formatting-ui/locale/zh-CN'
 import { UniverSheetsCrosshairHighlightPlugin } from '@univerjs/sheets-crosshair-highlight'
+import SheetsCrosshairHighlightEnUS from '@univerjs/sheets-crosshair-highlight/locale/en-US'
 import SheetsCrosshairHighlightZhCN from '@univerjs/sheets-crosshair-highlight/locale/zh-CN'
 import { UniverSheetsDataValidationPlugin } from '@univerjs/sheets-data-validation'
 import { UniverSheetsDataValidationUIPlugin } from '@univerjs/sheets-data-validation-ui'
+import SheetsDataValidationUIEnUS from '@univerjs/sheets-data-validation-ui/locale/en-US'
 import SheetsDataValidationUIZhCN from '@univerjs/sheets-data-validation-ui/locale/zh-CN'
 import { UniverSheetsDrawingPlugin } from '@univerjs/sheets-drawing'
 import { UniverSheetsDrawingUIPlugin } from '@univerjs/sheets-drawing-ui'
+import SheetsDrawingUIEnUS from '@univerjs/sheets-drawing-ui/locale/en-US'
 import SheetsDrawingUIZhCN from '@univerjs/sheets-drawing-ui/locale/zh-CN'
 import { UniverSheetsFilterUIPlugin } from '@univerjs/sheets-filter-ui'
+import SheetsFilterUIEnUS from '@univerjs/sheets-filter-ui/locale/en-US'
 import SheetsFilterUIZhCN from '@univerjs/sheets-filter-ui/locale/zh-CN'
 import { UniverSheetsFindReplacePlugin } from '@univerjs/sheets-find-replace'
 import { UniverSheetsFormulaUIPlugin } from '@univerjs/sheets-formula-ui'
+import SheetsFormulaUIEnUS from '@univerjs/sheets-formula-ui/locale/en-US'
 import SheetsFormulaUIZhCN from '@univerjs/sheets-formula-ui/locale/zh-CN'
 import { UniverSheetsHyperLinkUIPlugin } from '@univerjs/sheets-hyper-link-ui'
+import SheetsHyperLinkUIEnUS from '@univerjs/sheets-hyper-link-ui/locale/en-US'
 import SheetsHyperLinkUIZhCN from '@univerjs/sheets-hyper-link-ui/locale/zh-CN'
 import { UniverSheetsNoteUIPlugin } from '@univerjs/sheets-note-ui'
+import SheetsNoteUIEnUS from '@univerjs/sheets-note-ui/locale/en-US'
 import SheetsNoteUIZhCN from '@univerjs/sheets-note-ui/locale/zh-CN'
 import { UniverSheetsNumfmtUIPlugin } from '@univerjs/sheets-numfmt-ui'
+import SheetsNumfmtUIEnUS from '@univerjs/sheets-numfmt-ui/locale/en-US'
 import SheetsNumfmtUIZhCN from '@univerjs/sheets-numfmt-ui/locale/zh-CN'
 import { UniverSheetsSortUIPlugin } from '@univerjs/sheets-sort-ui'
+import SheetsSortUIEnUS from '@univerjs/sheets-sort-ui/locale/en-US'
 import SheetsSortUIZhCN from '@univerjs/sheets-sort-ui/locale/zh-CN'
 import { UniverSheetsTableUIPlugin } from '@univerjs/sheets-table-ui'
+import SheetsTableUIEnUS from '@univerjs/sheets-table-ui/locale/en-US'
 import SheetsTableUIZhCN from '@univerjs/sheets-table-ui/locale/zh-CN'
 import { UniverSheetsThreadCommentUIPlugin } from '@univerjs/sheets-thread-comment-ui'
+import SheetsThreadCommentUIEnUS from '@univerjs/sheets-thread-comment-ui/locale/en-US'
 import SheetsThreadCommentUIZhCN from '@univerjs/sheets-thread-comment-ui/locale/zh-CN'
 import { UniverSheetsUIPlugin } from '@univerjs/sheets-ui'
+import SheetsUIEnUS from '@univerjs/sheets-ui/locale/en-US'
 import SheetsUIZhCN from '@univerjs/sheets-ui/locale/zh-CN'
 import { UniverThreadCommentUIPlugin } from '@univerjs/thread-comment-ui'
+import ThreadCommentUIEnUS from '@univerjs/thread-comment-ui/locale/en-US'
 import ThreadCommentUIZhCN from '@univerjs/thread-comment-ui/locale/zh-CN'
 import { UniverUIPlugin } from '@univerjs/ui'
+import UIEnUS from '@univerjs/ui/locale/en-US'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
 
 import '@univerjs/sheets/facade'
@@ -83,10 +106,35 @@ import '@univerjs-pro/chart-ui/lib/index.css'
 import '@univerjs-pro/sheets-chart-ui/lib/index.css'
 import '@univerjs-pro/sheets-print/lib/index.css'
 
-export function createSheetRuntime(container: HTMLElement, snapshot: unknown) {
+export function createSheetRuntime(container: HTMLElement, snapshot: unknown, language: 'en' | 'zh' = 'en') {
   const univer = new Univer({
-    locale: LocaleType.ZH_CN,
+    locale: language === 'zh' ? LocaleType.ZH_CN : LocaleType.EN_US,
     locales: {
+      [LocaleType.EN_US]: mergeLocales(
+        DesignEnUS,
+        UIEnUS,
+        DocsUIEnUS,
+        DrawingUIEnUS,
+        SheetsEnUS,
+        SheetsUIEnUS,
+        SheetsDrawingUIEnUS,
+        SheetsFormulaUIEnUS,
+        SheetsNumfmtUIEnUS,
+        SheetsFilterUIEnUS,
+        SheetsConditionalFormattingUIEnUS,
+        SheetsDataValidationUIEnUS,
+        SheetsSortUIEnUS,
+        FindReplaceEnUS,
+        ThreadCommentUIEnUS,
+        SheetsThreadCommentUIEnUS,
+        SheetsNoteUIEnUS,
+        SheetsHyperLinkUIEnUS,
+        SheetsTableUIEnUS,
+        SheetsCrosshairHighlightEnUS,
+        ChartUIEnUS,
+        SheetsChartUIEnUS,
+        SheetsPrintEnUS,
+      ),
       [LocaleType.ZH_CN]: mergeLocales(
         DesignZhCN,
         UIZhCN,

@@ -12,6 +12,10 @@
 
 业务代码仍按 `src/modules/` 下的三个目录独立维护；`src/index.ts` 和 `src/client.ts` 只是薄组合入口。
 
+## 界面语言
+
+Univer Sheet、Doc、Slide 及 Workspace Office 预览内置 `en`、`zh` 两套语言包，并实时跟随 DSH **Settings → General → Language**。DSH 当前语言为 `zh` 时使用简体中文，为 `en` 时使用英文；其他语言均回退到英文。
+
 安装、界面操作、AI 使用示例、格式支持和故障排查请参阅 [`USE.md`](./USE.md)。
 
 ## 目录
