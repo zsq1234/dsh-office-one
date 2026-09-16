@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { ExchangeFormat, exportToFile, importBuffer } from '@univerjs-pro/exchange-node';
 import { UniverInstanceType } from '@univerjs/core';
+import { normalizeSlides } from './normalize-slides.mjs';
 
 const port = Number(process.env.PORT ?? 8787);
 const maxBodyBytes = 300 * 1024 * 1024;
@@ -59,44 +60,6 @@ function importFormat(unitType, format, fileName) {
   const inferred = format || extname(fileName).slice(1).toLowerCase();
   if (!importFormats[unitType]?.has(inferred)) return null;
   return inferred;
-}
-
-// PPTX files can contain slides that the exchange-node importer converts without a
-// layoutPageId (e.g. decks whose later slides carry no layout reference), and the
-// native exporter rejects such pages ("validation error: slide <id> is missing
-// layoutPageId"). Repair the slide snapshot in place: every slide whose
-// layoutPageId is absent or unknown is pointed at a layout that actually exists.
-// Accepts either the slide unit snapshot directly or the { slide: snapshot }
-// envelope returned by the editor's save().
-function normalizeSlides(data) {
-  const unit = data?.slide ?? data;
-  if (!unit || typeof unit !== 'object') return data;
-  const { slides, layoutPageOrder, layoutPages, slideOrder } = unit;
-  if (!slides || typeof slides !== 'object') return data;
-
-  const layoutIds = new Set();
-  if (Array.isArray(layoutPageOrder)) for (const id of layoutPageOrder) layoutIds.add(id);
-  if (layoutPages && typeof layoutPages === 'object') for (const id of Object.keys(layoutPages)) layoutIds.add(id);
-  if (layoutIds.size === 0) return data;
-
-  const ordered = Array.isArray(slideOrder) && slideOrder.length > 0 ? slideOrder : Object.keys(slides);
-  let fallback = null;
-  for (const slideId of ordered) {
-    const page = slides[slideId];
-    if (page && typeof page === 'object' && typeof page.layoutPageId === 'string' && layoutIds.has(page.layoutPageId)) {
-      fallback = page.layoutPageId;
-      break;
-    }
-  }
-  if (fallback === null) fallback = layoutIds.values().next().value;
-
-  for (const page of Object.values(slides)) {
-    if (!page || typeof page !== 'object') continue;
-    if (typeof page.layoutPageId !== 'string' || !layoutIds.has(page.layoutPageId)) {
-      page.layoutPageId = fallback;
-    }
-  }
-  return data;
 }
 
 const server = createServer(async (request, response) => {

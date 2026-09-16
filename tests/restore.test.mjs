@@ -15,7 +15,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve))
 function mountRestore(product, options = {}) {
   const [unitType, component, markerName, visibleSetter] = product
   const componentStart = source.indexOf(`function ${component}(`)
-  const start = source.indexOf('  useEffect(() => {\n    let cancelled = false\n    runtimeRef.current?.univer.dispose()', componentStart)
+  const start = source.indexOf('  useEffect(() => {\n    let cancelled = false\n    appliedRef.current.clear()', componentStart)
   assert.ok(start > componentStart, `${component} initialization effect exists`)
   const end = source.indexOf('  }, [sessionId])', start)
   assert.ok(end > start)
@@ -50,6 +50,7 @@ function mountRestore(product, options = {}) {
     hydratedFromHostRef: { current: true },
     [markerName]: markers,
     clientConnection,
+    props: { onRuntimePresenceChange: () => {} },
     loadUnitFilePath,
     setHostLoaded: (value) => { state.loaded = value },
     setHostSnapshot: (value) => { state.snapshot = value },

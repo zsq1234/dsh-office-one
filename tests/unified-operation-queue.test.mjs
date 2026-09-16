@@ -40,24 +40,26 @@ test('Host persists one target-aware operation queue for all Univer products', (
   }
 })
 
-test('Univer shell uses one aggregated task poll and atomic operation commits', () => {
+test('resident Univer shell uses one aggregated task poll and atomic operation commits', () => {
   assert.match(client, /function UniverView\(props: ConvViewProps\)/)
+  assert.match(client, /createPortal\(<UniverView/)
   assert.match(client, /'tasks'/)
+  assert.doesNotMatch(client, /'univer-code-requests'/)
   assert.match(client, /tasks\.operations\.slice\(0, 1\)/)
   assert.match(client, /'commit-operations'/)
   assert.match(client, /clientId: univerCodeClientId/)
-  for (const legacyPoll of ['sheet-operations', 'operations', 'univer-code-target', 'univer-code-requests', 'doc-screenshot-requests', 'slide-screenshot-requests', 'slide-runtime-heartbeat']) {
+  for (const legacyPoll of ['sheet-operations', 'operations', 'univer-code-target', 'doc-screenshot-requests', 'slide-screenshot-requests', 'slide-runtime-heartbeat']) {
     assert.ok(!client.includes(`'${legacyPoll}'`), `${legacyPoll} is not polled by the client`)
   }
   assert.doesNotMatch(client, /acknowledgeOperations/)
 })
 
-test('Slide screenshot is the only retained tool with an active-runtime guard', () => {
+test('Slide screenshots can queue without the Slide tab being active', () => {
   const calls = host.match(/requireActiveSlide\(sessionId\)/g) ?? []
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 0)
   const screenshotStart = host.indexOf("name: 'univer_slide_screenshot'")
   assert.ok(screenshotStart >= 0)
-  assert.match(host.slice(screenshotStart), /requireActiveSlide\(sessionId\)/)
+  assert.doesNotMatch(host.slice(screenshotStart), /requireActiveSlide\(sessionId\)/)
 })
 
 test('tool results distinguish queued, applied, and rendered states', () => {

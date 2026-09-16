@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ClientContext, ConversationNode } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -28,6 +29,9 @@ import SheetsChartUIZhCN from '@univerjs-pro/sheets-chart-ui/locale/zh-CN'
 import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
 import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { getSlidesEmptySnapshot, PageElementTypeEnum, UniverSlidesPlugin } from '@univerjs-pro/slides'
+import { UniverSlidesChartPlugin } from '@univerjs-pro/slides-chart'
+import { UniverSlidesChartUIPlugin } from '@univerjs-pro/slides-chart-ui'
+import SlidesChartUIZhCN from '@univerjs-pro/slides-chart-ui/locale/zh-CN'
 import { installScrollContainment } from './scroll-containment.js'
 import type { ISlideData, ISlideTextElement } from '@univerjs-pro/slides'
 import type { FPresentation } from '@univerjs-pro/slides/facade'
@@ -37,6 +41,7 @@ import '@univerjs-pro/engine-chart/facade'
 import '@univerjs-pro/chart-ui/facade'
 import '@univerjs-pro/sheets-chart/facade'
 import '@univerjs-pro/slides/facade'
+import '@univerjs-pro/slides-chart/facade'
 import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
 import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
 
@@ -45,6 +50,7 @@ import '@univerjs/preset-docs-drawing/lib/index.css'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs-pro/chart-ui/lib/index.css'
 import '@univerjs-pro/sheets-chart-ui/lib/index.css'
+import '@univerjs-pro/slides-chart-ui/lib/index.css'
 import '@univerjs/design/lib/index.css'
 import '@univerjs/ui/lib/index.css'
 import '@univerjs/docs-ui/lib/index.css'
@@ -914,6 +920,87 @@ const clientConnection: { current: ConnectionHandle | null } = { current: null }
 const univerCodeClientId = crypto.randomUUID()
 const UNIVER_CODE_DEBUG_FLAG = '__DSH_UNIVER_CODE_DEBUG__'
 
+type ResidentMountedRuntime = MountedRuntime | MountedSlideRuntime
+
+type ResidentRuntimeEntry = {
+  sessionId: string
+  unitType: UniverUnitType
+  runtime: ResidentMountedRuntime
+  save: () => unknown
+  savingRef: React.MutableRefObject<boolean>
+  pendingSaveRef: React.MutableRefObject<Promise<void> | null>
+  lastSavedRef: React.MutableRefObject<string | null>
+}
+
+const residentRuntimes = new Map<string, ResidentRuntimeEntry>()
+const residentViewShells = new Map<string, HTMLDivElement>()
+let residentRuntimeParkingHost: HTMLDivElement | null = null
+let currentResidentSessionId: string | null = null
+
+function residentRuntimeKey(sessionId: string, unitType: UniverUnitType): string {
+  return `${sessionId}:${unitType}`
+}
+
+function getResidentRuntimeParkingHost(): HTMLDivElement {
+  if (residentRuntimeParkingHost?.isConnected) return residentRuntimeParkingHost
+  const host = document.createElement('div')
+  host.className = 'dsh-univer-create-runtime-parking'
+  host.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(host)
+  residentRuntimeParkingHost = host
+  return host
+}
+
+function getResidentViewShell(sessionId: string): HTMLDivElement {
+  const cached = residentViewShells.get(sessionId)
+  if (cached !== undefined) return cached
+  const shell = document.createElement('div')
+  shell.className = 'dsh-univer-create-resident-shell'
+  shell.dataset.sessionId = sessionId
+  getResidentRuntimeParkingHost().appendChild(shell)
+  residentViewShells.set(sessionId, shell)
+  return shell
+}
+
+function getResidentRuntime<Runtime extends ResidentMountedRuntime>(sessionId: string, unitType: UniverUnitType): Runtime | null {
+  return residentRuntimes.get(residentRuntimeKey(sessionId, unitType))?.runtime as Runtime | undefined ?? null
+}
+
+function registerResidentRuntime(
+  sessionId: string,
+  unitType: UniverUnitType,
+  runtime: ResidentMountedRuntime,
+  save: () => unknown,
+  savingRef: React.MutableRefObject<boolean>,
+  pendingSaveRef: React.MutableRefObject<Promise<void> | null>,
+  lastSavedRef: React.MutableRefObject<string | null>,
+): void {
+  const key = residentRuntimeKey(sessionId, unitType)
+  const previous = residentRuntimes.get(key)
+  if (previous !== undefined && previous.runtime !== runtime) {
+    previous.runtime.univer.dispose()
+    previous.runtime.mount.remove()
+  } else if (previous !== undefined) {
+    savingRef.current = previous.savingRef.current
+    pendingSaveRef.current = previous.pendingSaveRef.current
+    lastSavedRef.current = previous.lastSavedRef.current
+  }
+  residentRuntimes.set(key, { sessionId, unitType, runtime, save, savingRef, pendingSaveRef, lastSavedRef })
+}
+
+function disposeResidentRuntime(sessionId: string, unitType: UniverUnitType, runtime: ResidentMountedRuntime | null): void {
+  if (runtime === null) return
+  const key = residentRuntimeKey(sessionId, unitType)
+  if (residentRuntimes.get(key)?.runtime === runtime) residentRuntimes.delete(key)
+  runtime.univer.dispose()
+  runtime.mount.remove()
+}
+
+function parkResidentRuntime(sessionId: string, unitType: UniverUnitType, runtime: ResidentMountedRuntime | null): void {
+  if (runtime === null || residentRuntimes.get(residentRuntimeKey(sessionId, unitType))?.runtime !== runtime) return
+  getResidentRuntimeParkingHost().appendChild(runtime.mount)
+}
+
 function debugUniverCode(sessionId: string, unitType: UniverUnitType, requestId: string, code: string): void {
   if ((globalThis as Record<string, unknown>)[UNIVER_CODE_DEBUG_FLAG] !== true) return
   console.groupCollapsed(`[dsh-univer] execute ${unitType} code (${requestId})`)
@@ -1000,76 +1087,123 @@ async function executeFacadeCode(code: string, univerAPI: FUniver): Promise<{ re
   }
 }
 
-function useUniverCodeExecutor(
-  sessionId: string,
-  unitType: UniverUnitType,
-  requests: UniverCodeRequest[],
-  ready: boolean,
-  runtimeRef: React.MutableRefObject<MountedRuntime | MountedSlideRuntime | null>,
-  savingRef: React.MutableRefObject<boolean>,
-  pendingSaveRef: React.MutableRefObject<Promise<void> | null>,
-  lastSavedRef: React.MutableRefObject<string | null>,
-): void {
-  const inFlightRef = useRef(new Set<string>())
-  const mountedRef = useRef(true)
+const residentCodeRequestsInFlight = new Set<string>()
+const residentRuntimeTaskQueues = new Map<string, Promise<void>>()
+
+function disposeInactiveParkedRuntimes(): void {
+  for (const entry of [...residentRuntimes.values()]) {
+    const key = residentRuntimeKey(entry.sessionId, entry.unitType)
+    const inactive = currentResidentSessionId === null || entry.sessionId !== currentResidentSessionId
+    if (inactive && entry.runtime.mount.parentElement === residentRuntimeParkingHost && !residentRuntimeTaskQueues.has(key)) {
+      disposeResidentRuntime(entry.sessionId, entry.unitType, entry.runtime)
+    }
+  }
+}
+
+function enqueueResidentRuntimeTask(key: string, task: () => Promise<void>): Promise<void> {
+  const previous = residentRuntimeTaskQueues.get(key) ?? Promise.resolve()
+  const queued = previous.catch(() => {}).then(task)
+  residentRuntimeTaskQueues.set(key, queued)
+  void queued.finally(() => {
+    if (residentRuntimeTaskQueues.get(key) === queued) residentRuntimeTaskQueues.delete(key)
+    disposeInactiveParkedRuntimes()
+  }).catch(() => {})
+  return queued
+}
+
+function queueResidentFinalSave(entry: ResidentRuntimeEntry, task: () => Promise<unknown>): void {
+  const key = residentRuntimeKey(entry.sessionId, entry.unitType)
+  const previousSave = entry.pendingSaveRef.current
+  entry.savingRef.current = true
+  const queued = enqueueResidentRuntimeTask(key, async () => {
+    await previousSave?.catch(() => {})
+    await task()
+  })
+  entry.pendingSaveRef.current = queued
+  void queued.finally(() => {
+    if (entry.pendingSaveRef.current === queued) {
+      entry.pendingSaveRef.current = null
+      entry.savingRef.current = false
+    }
+    const current = residentRuntimes.get(key)
+    if (current?.pendingSaveRef.current === queued) {
+      current.pendingSaveRef.current = null
+      current.savingRef.current = false
+    }
+  }).catch(() => {})
+}
+
+async function executeResidentCodeRequest(sessionId: string, request: UniverCodeRequest): Promise<void> {
+  const connection = clientConnection.current
+  const key = residentRuntimeKey(sessionId, request.unitType)
+  const entry = residentRuntimes.get(key)
+  if (connection === null || entry === undefined || residentCodeRequestsInFlight.has(request.id)) return
+  residentCodeRequestsInFlight.add(request.id)
+  const pendingSave = entry.pendingSaveRef.current
+  const queued = enqueueResidentRuntimeTask(key, async () => {
+    if (currentResidentSessionId !== sessionId || residentRuntimes.get(key) !== entry) return
+    const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
+      sessionId,
+      codeRequestId: request.id,
+      clientId: univerCodeClientId,
+    })
+    if (!claimed.ok || claimed.value === null) return
+    let execution: { result?: string; logs: string[]; error?: string } = { logs: [] }
+    try {
+      await pendingSave
+      if (residentRuntimes.get(key) !== entry) throw new Error(`当前浏览器没有打开已创建的 Univer ${request.unitType}`)
+      entry.savingRef.current = true
+      debugUniverCode(sessionId, request.unitType, request.id, request.code)
+      execution = await executeFacadeCode(request.code, entry.runtime.univerAPI)
+      if (execution.error === undefined) {
+        const snapshot = entry.save()
+        if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${request.unitType}`)
+        const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: request.unitType, snapshot })
+        if (!saved.ok) throw new Error(saved.error.message)
+        entry.lastSavedRef.current = JSON.stringify(snapshot)
+      }
+    } catch (reason) {
+      execution = {
+        error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
+        logs: execution.logs,
+      }
+    } finally {
+      entry.savingRef.current = false
+    }
+    await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
+      sessionId,
+      codeRequestId: request.id,
+      clientId: univerCodeClientId,
+      ...execution,
+    }).catch(() => {})
+  })
+  try {
+    await queued
+  } finally {
+    residentCodeRequestsInFlight.delete(request.id)
+  }
+}
+
+function UniverSessionRuntimeTracker(props: ConvViewProps) {
+  const shell = useMemo(() => getResidentViewShell(props.sessionId), [props.sessionId])
+  useLayoutEffect(() => {
+    if (!shell.isConnected) getResidentRuntimeParkingHost().appendChild(shell)
+  }, [shell])
   useEffect(() => {
-    mountedRef.current = true
+    currentResidentSessionId = props.sessionId
     return () => {
-      mountedRef.current = false
-      inFlightRef.current.clear()
+      if (currentResidentSessionId === props.sessionId) {
+        currentResidentSessionId = null
+        disposeInactiveParkedRuntimes()
+      }
+      window.setTimeout(() => {
+        if (residentViewShells.get(props.sessionId) !== shell || currentResidentSessionId === props.sessionId) return
+        residentViewShells.delete(props.sessionId)
+        shell.remove()
+      }, 0)
     }
-  }, [])
-  useEffect(() => {
-    if (!ready || runtimeRef.current === null || savingRef.current) return
-    const connection = clientConnection.current
-    if (connection === null) return
-    for (const request of requests) {
-      if (request.unitType !== unitType || inFlightRef.current.has(request.id)) continue
-      inFlightRef.current.add(request.id)
-      void (async () => {
-        const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
-          sessionId,
-          codeRequestId: request.id,
-          clientId: univerCodeClientId,
-        })
-        if (!claimed.ok || claimed.value === null || !mountedRef.current) return
-        let execution: { result?: string; logs: string[]; error?: string } = { logs: [] }
-        try {
-          await pendingSaveRef.current
-          const runtime = runtimeRef.current
-          if (!mountedRef.current || runtime === null) throw new Error(`当前浏览器没有打开已创建的 Univer ${unitType}`)
-          savingRef.current = true
-          debugUniverCode(sessionId, unitType, request.id, request.code)
-          execution = await executeFacadeCode(request.code, runtime.univerAPI)
-          if (execution.error === undefined) {
-            const snapshot = unitType === 'slide'
-              ? (runtime as MountedSlideRuntime).presentation.save()
-              : unitType === 'doc'
-                ? runtime.univerAPI.getActiveDocument()?.save()
-                : runtime.univerAPI.getActiveWorkbook()?.save()
-            if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${unitType}`)
-            const serialized = JSON.stringify(snapshot)
-            const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType, snapshot })
-            if (!saved.ok) throw new Error(saved.error.message)
-            lastSavedRef.current = serialized
-          }
-        } catch (reason) {
-          execution = {
-            error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
-            logs: execution.logs,
-          }
-        } finally {
-          savingRef.current = false
-        }
-        await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
-          sessionId,
-          codeRequestId: request.id,
-          clientId: univerCodeClientId,
-          ...execution,
-        }).catch(() => {})
-      })().finally(() => inFlightRef.current.delete(request.id))
-    }
-  }, [sessionId, unitType, requests, ready, runtimeRef, savingRef, pendingSaveRef, lastSavedRef])
+  }, [props.sessionId, shell])
+  return createPortal(<UniverView {...props} />, shell)
 }
 
 // Browser-lifetime markers control only the initial loading presentation.
@@ -1150,7 +1284,7 @@ function SheetProductView(props: ProductViewProps) {
     .slice(-4), [nodes])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const runtimeRef = useRef<MountedRuntime | null>(null)
+  const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'sheet'))
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话表格')
@@ -1171,7 +1305,6 @@ function SheetProductView(props: ProductViewProps) {
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const sheetScreenshotInFlightRef = useRef(new Set<string>())
-  useUniverCodeExecutor(sessionId, 'sheet', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const queuedPersistingRef = useRef(false)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
@@ -1190,9 +1323,6 @@ function SheetProductView(props: ProductViewProps) {
 
   useEffect(() => {
     let cancelled = false
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
-    runtimeRef.current = null
     appliedRef.current.clear()
     lastSavedRef.current = null
     setHostSnapshot(null)
@@ -1203,7 +1333,7 @@ function SheetProductView(props: ProductViewProps) {
 
     // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setSheetVisible(openedWorkbookSessions.has(sessionId))
+    setSheetVisible(runtimeRef.current !== null || openedWorkbookSessions.has(sessionId))
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
@@ -1236,9 +1366,22 @@ function SheetProductView(props: ProductViewProps) {
   }, [sessionId])
 
   useLayoutEffect(() => {
-    if (!hostLoaded) return
     const container = containerRef.current
     if (container === null) return
+    const resident = runtimeRef.current
+    if (resident !== null && resident.mount.parentElement !== container) {
+      container.appendChild(resident.mount)
+      registerResidentRuntime(
+        sessionId,
+        'sheet',
+        resident,
+        () => normalizeWorkbookSnapshot(resident.univerAPI.getActiveWorkbook()?.save()),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
+    }
+    if (!hostLoaded) return
     const bounds = container.getBoundingClientRect()
     // Univer's editor cannot bootstrap while the Sheet view is hidden or its
     // flex parent has not received dimensions yet. ResizeObserver above will
@@ -1251,7 +1394,6 @@ function SheetProductView(props: ProductViewProps) {
     ) => {
       // Mount each Univer instance in its own DOM island. React owns only the
       // outer host; Univer owns the island and its descendants.
-      const previous = runtimeRef.current
       const mount = document.createElement('div')
       mount.className = 'dsh-univer-create-runtime-host'
       container.appendChild(mount)
@@ -1269,13 +1411,19 @@ function SheetProductView(props: ProductViewProps) {
         ],
       })
       runtime.univerAPI.createWorkbook(normalizeWorkbookSnapshot(snapshot ?? workbookData(operation)))
-      runtimeRef.current = Object.assign(runtime, { mount })
+      const mounted = Object.assign(runtime, { mount })
+      runtimeRef.current = mounted
+      registerResidentRuntime(
+        sessionId,
+        'sheet',
+        mounted,
+        () => normalizeWorkbookSnapshot(mounted.univerAPI.getActiveWorkbook()?.save()),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
       openedWorkbookSessions.add(sessionId)
       setSheetVisible(true)
-      if (previous !== null) {
-        previous.univer.dispose()
-        previous.mount.remove()
-      }
       const snapshotTitle = snapshot !== null && typeof snapshot === 'object' && typeof (snapshot as any).name === 'string'
         ? (snapshot as any).name
         : undefined
@@ -1460,17 +1608,18 @@ function SheetProductView(props: ProductViewProps) {
   }, [sessionId, hostLoaded, sheetVisible, props.sheetScreenshotRequests])
 
   useLayoutEffect(() => () => {
-    const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
-    if (workbook !== undefined && workbook !== null && clientConnection.current !== null) {
-      const connection = clientConnection.current
-      const nextSnapshot = normalizeWorkbookSnapshot(workbook.save())
-      const finalSave = () => connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot: nextSnapshot })
-      const pending = pendingSaveRef.current
-      if (pending === null) void finalSave()
-      else void pending.then(finalSave, finalSave)
+    const resident = runtimeRef.current
+    const entry = residentRuntimes.get(residentRuntimeKey(sessionId, 'sheet'))
+    const connection = clientConnection.current
+    if (resident !== null && entry?.runtime === resident && connection !== null) {
+      queueResidentFinalSave(entry, async () => {
+        const workbook = resident.univerAPI.getActiveWorkbook()
+        if (workbook === undefined || workbook === null) return
+        const snapshot = normalizeWorkbookSnapshot(workbook.save())
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot })
+      })
     }
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    parkResidentRuntime(sessionId, 'sheet', resident)
     runtimeRef.current = null
     appliedRef.current.clear()
   }, [sessionId])
@@ -1529,8 +1678,7 @@ function SheetProductView(props: ProductViewProps) {
 
   const newWorkbook = async () => {
     const blankSnapshot = normalizeWorkbookSnapshot(workbookData({ action: 'new', seq: Date.now() }))
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
     runtimeRef.current = null
     // A manually created workbook replaces both the persisted workbook and any
     // conversation operations that belong to the previous workbook.
@@ -1555,8 +1703,7 @@ function SheetProductView(props: ProductViewProps) {
     setError(null)
     try {
       const importedSnapshot = await importWorkbookFromFile(file)
-      runtimeRef.current?.univer.dispose()
-      runtimeRef.current?.mount.remove()
+      disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
       runtimeRef.current = null
       // An imported file replaces the conversation-generated workbook. Keep the
       // historical tool calls from replaying over the imported workbook.
@@ -1728,7 +1875,7 @@ function DocProductView(props: ProductViewProps) {
     .slice(-4), [nodes])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const runtimeRef = useRef<MountedRuntime | null>(null)
+  const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'doc'))
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话文档')
@@ -1748,7 +1895,6 @@ function DocProductView(props: ProductViewProps) {
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const queuedPersistingRef = useRef(false)
   const docScreenshotInFlightRef = useRef(new Set<string>())
-  useUniverCodeExecutor(sessionId, 'doc', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
   useLayoutEffect(() => {
@@ -1766,9 +1912,6 @@ function DocProductView(props: ProductViewProps) {
 
   useEffect(() => {
     let cancelled = false
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
-    runtimeRef.current = null
     appliedRef.current.clear()
     lastSavedRef.current = null
     setHostSnapshot(null)
@@ -1779,7 +1922,7 @@ function DocProductView(props: ProductViewProps) {
 
     // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setDocumentVisible(openedDocumentSessions.has(sessionId))
+    setDocumentVisible(runtimeRef.current !== null || openedDocumentSessions.has(sessionId))
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
@@ -1812,9 +1955,22 @@ function DocProductView(props: ProductViewProps) {
   }, [sessionId])
 
   useLayoutEffect(() => {
-    if (!hostLoaded) return
     const container = containerRef.current
     if (container === null) return
+    const resident = runtimeRef.current
+    if (resident !== null && resident.mount.parentElement !== container) {
+      container.appendChild(resident.mount)
+      registerResidentRuntime(
+        sessionId,
+        'doc',
+        resident,
+        () => resident.univerAPI.getActiveDocument()?.save(),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
+    }
+    if (!hostLoaded) return
     const bounds = container.getBoundingClientRect()
     if (bounds.width <= 0 || bounds.height <= 0) return
 
@@ -1822,7 +1978,6 @@ function DocProductView(props: ProductViewProps) {
       operation?: Extract<DocOperation, { action: 'new-doc' }>,
       restoredSnapshot?: unknown,
     ) => {
-      const previous = runtimeRef.current
       const mount = document.createElement('div')
       mount.className = 'dsh-univer-create-runtime-host'
       container.appendChild(mount)
@@ -1843,13 +1998,19 @@ function DocProductView(props: ProductViewProps) {
       })
       const fDocument = runtime.univerAPI.createDocument((restoredSnapshot ?? documentData(operation)) as any)
       if (restoredSnapshot === undefined && operation?.text) fDocument.insertText(0, operation.text)
-      runtimeRef.current = Object.assign(runtime, { mount })
+      const mounted = Object.assign(runtime, { mount })
+      runtimeRef.current = mounted
+      registerResidentRuntime(
+        sessionId,
+        'doc',
+        mounted,
+        () => mounted.univerAPI.getActiveDocument()?.save(),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
       openedDocumentSessions.add(sessionId)
       setDocumentVisible(true)
-      if (previous !== null) {
-        previous.univer.dispose()
-        previous.mount.remove()
-      }
       const snapshotTitle = restoredSnapshot !== null && typeof restoredSnapshot === 'object' && typeof (restoredSnapshot as any).title === 'string'
         ? (restoredSnapshot as any).title
         : undefined
@@ -1997,17 +2158,18 @@ function DocProductView(props: ProductViewProps) {
   }, [sessionId, hostLoaded, documentVisible, props.docScreenshotRequests])
 
   useLayoutEffect(() => () => {
-    const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
-    if (fDocument !== undefined && fDocument !== null && clientConnection.current !== null) {
-      const connection = clientConnection.current
-      const nextSnapshot = fDocument.save()
-      const finalSave = () => connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'doc', snapshot: nextSnapshot })
-      const pending = pendingSaveRef.current
-      if (pending === null) void finalSave()
-      else void pending.then(finalSave, finalSave)
+    const resident = runtimeRef.current
+    const entry = residentRuntimes.get(residentRuntimeKey(sessionId, 'doc'))
+    const connection = clientConnection.current
+    if (resident !== null && entry?.runtime === resident && connection !== null) {
+      queueResidentFinalSave(entry, async () => {
+        const fDocument = resident.univerAPI.getActiveDocument()
+        if (fDocument === undefined || fDocument === null) return
+        const snapshot = fDocument.save()
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'doc', snapshot })
+      })
     }
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    parkResidentRuntime(sessionId, 'doc', resident)
     runtimeRef.current = null
     appliedRef.current.clear()
   }, [sessionId])
@@ -2028,8 +2190,7 @@ function DocProductView(props: ProductViewProps) {
 
   const newDocument = async () => {
     const blankSnapshot = documentData({ action: 'new-doc', seq: Date.now() })
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
     runtimeRef.current = null
     appliedRef.current.clear()
     hydratedFromHostRef.current = true
@@ -2052,8 +2213,7 @@ function DocProductView(props: ProductViewProps) {
     setError(null)
     try {
       const importedSnapshot = await importDocumentFromFile(file)
-      runtimeRef.current?.univer.dispose()
-      runtimeRef.current?.mount.remove()
+      disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
       runtimeRef.current = null
       appliedRef.current.clear()
       hydratedFromHostRef.current = true
@@ -2270,7 +2430,7 @@ function SlideProductView(props: ProductViewProps) {
     .slice(-4), [nodes])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const runtimeRef = useRef<MountedSlideRuntime | null>(null)
+  const runtimeRef = useRef<MountedSlideRuntime | null>(getResidentRuntime<MountedSlideRuntime>(sessionId, 'slide'))
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话演示文稿')
@@ -2289,7 +2449,6 @@ function SlideProductView(props: ProductViewProps) {
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const queuedPersistingRef = useRef(false)
-  useUniverCodeExecutor(sessionId, 'slide', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const screenshotInFlightRef = useRef(new Set<string>())
   const slideResizeTimersRef = useRef<number[]>([])
   const [layoutVersion, setLayoutVersion] = useState(0)
@@ -2329,9 +2488,6 @@ function SlideProductView(props: ProductViewProps) {
 
   useEffect(() => {
     let cancelled = false
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
-    runtimeRef.current = null
     appliedRef.current.clear()
     lastSavedRef.current = null
     setHostSnapshot(null)
@@ -2342,7 +2498,7 @@ function SlideProductView(props: ProductViewProps) {
 
     // A refresh clears the browser marker, but must not bypass durable storage.
     setHostLoaded(false)
-    setPresentationVisible(openedPresentationSessions.has(sessionId))
+    setPresentationVisible(runtimeRef.current !== null || openedPresentationSessions.has(sessionId))
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
@@ -2375,9 +2531,22 @@ function SlideProductView(props: ProductViewProps) {
   }, [sessionId])
 
   useLayoutEffect(() => {
-    if (!hostLoaded) return
     const container = containerRef.current
     if (container === null) return
+    const resident = runtimeRef.current
+    if (resident !== null && resident.mount.parentElement !== container) {
+      container.appendChild(resident.mount)
+      registerResidentRuntime(
+        sessionId,
+        'slide',
+        resident,
+        () => resident.presentation.save(),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
+    }
+    if (!hostLoaded) return
     const bounds = container.getBoundingClientRect()
     if (bounds.width <= 0 || bounds.height <= 0) return
 
@@ -2385,7 +2554,6 @@ function SlideProductView(props: ProductViewProps) {
       operation?: Extract<SlideOperation, { action: 'new-slide' }>,
       restoredSnapshot?: ISlideData,
     ) => {
-      const previous = runtimeRef.current
       slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
       slideResizeTimersRef.current = []
       const mount = document.createElement('div')
@@ -2395,7 +2563,7 @@ function SlideProductView(props: ProductViewProps) {
       const univer = new Univer({
         locale: LocaleType.ZH_CN,
         locales: {
-          [LocaleType.ZH_CN]: mergeLocales(DesignZhCN, UIZhCN, DocsUIZhCN, ShapeEditorUIZhCN, SlidesUIZhCN),
+          [LocaleType.ZH_CN]: mergeLocales(DesignZhCN, UIZhCN, DocsUIZhCN, ShapeEditorUIZhCN, SlidesUIZhCN, ChartUIZhCN, SlidesChartUIZhCN),
         },
       })
       univer.registerPlugin(UniverRenderEnginePlugin)
@@ -2405,17 +2573,25 @@ function SlideProductView(props: ProductViewProps) {
       univer.registerPlugin(UniverDrawingPlugin)
       univer.registerPlugin(UniverLicensePlugin, { license: UNIVER_LICENSE })
       univer.registerPlugin(UniverSlidesPlugin)
+      univer.registerPlugin(UniverSlidesChartPlugin)
       univer.registerPlugin(UniverSlidesUIPlugin)
+      univer.registerPlugin(UniverSlidesChartUIPlugin)
 
       const univerAPI = FUniver.newAPI(univer)
       const presentation = univerAPI.createPresentation(normalizeAiSlideLayouts(restoredSnapshot ?? presentationData(operation)))
-      runtimeRef.current = { univer, univerAPI, mount, presentation }
+      const mounted = { univer, univerAPI, mount, presentation }
+      runtimeRef.current = mounted
+      registerResidentRuntime(
+        sessionId,
+        'slide',
+        mounted,
+        () => presentation.save(),
+        savingRef,
+        pendingSaveRef,
+        lastSavedRef,
+      )
       openedPresentationSessions.add(sessionId)
       setPresentationVisible(true)
-      if (previous !== null) {
-        previous.univer.dispose()
-        previous.mount.remove()
-      }
       setTitle(operation?.title ?? restoredSnapshot?.name ?? '对话演示文稿')
 
       // Slides UI mounts the main render scene and each page thumbnail scene
@@ -2664,19 +2840,18 @@ function SlideProductView(props: ProductViewProps) {
   }, [sessionId, hostLoaded, presentationVisible, props.slideScreenshotRequests])
 
   useLayoutEffect(() => () => {
-    const presentation = runtimeRef.current?.presentation
-    if (presentation !== undefined && clientConnection.current !== null) {
-      const connection = clientConnection.current
-      const nextSnapshot = presentation.save()
-      const finalSave = () => connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot: nextSnapshot })
-      const pending = pendingSaveRef.current
-      if (pending === null) void finalSave()
-      else void pending.then(finalSave, finalSave)
+    const resident = runtimeRef.current
+    const entry = residentRuntimes.get(residentRuntimeKey(sessionId, 'slide'))
+    const connection = clientConnection.current
+    if (resident !== null && entry?.runtime === resident && connection !== null) {
+      queueResidentFinalSave(entry, async () => {
+        const snapshot = resident.presentation.save()
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot })
+      })
     }
     slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     slideResizeTimersRef.current = []
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    parkResidentRuntime(sessionId, 'slide', resident)
     runtimeRef.current = null
     appliedRef.current.clear()
   }, [sessionId])
@@ -2698,8 +2873,7 @@ function SlideProductView(props: ProductViewProps) {
   const replacePresentation = async (nextSnapshot: ISlideData, nextTitle: string, nextFilePath: string | null) => {
     slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     slideResizeTimersRef.current = []
-    runtimeRef.current?.univer.dispose()
-    runtimeRef.current?.mount.remove()
+    disposeResidentRuntime(sessionId, 'slide', runtimeRef.current)
     runtimeRef.current = null
     appliedRef.current.clear()
     hydratedFromHostRef.current = true
@@ -2840,8 +3014,16 @@ const selectedUnitBySession = new Map<string, UniverUnitType>()
 
 function UniverView(props: ConvViewProps) {
   const { nodes } = useConversationFeed(props)
+  const sessionRunning = props.useSession((session) => session.running)
   const shellRef = useRef<HTMLElement>(null)
   const [tasks, setTasks] = useState<UniverTasks>(EMPTY_UNIVER_TASKS)
+  const [drainingTasks, setDrainingTasks] = useState(true)
+  const emptyDrainPollsRef = useRef(0)
+  useEffect(() => {
+    if (!sessionRunning) return
+    emptyDrainPollsRef.current = 0
+    setDrainingTasks(true)
+  }, [sessionRunning])
   const suggestedUnit = useMemo<UniverUnitType>(() => {
     for (let index = nodes.length - 1; index >= 0; index -= 1) {
       const node = nodes[index]!
@@ -2867,6 +3049,10 @@ function UniverView(props: ConvViewProps) {
   const dispatchOperations = useMemo(() => tasks.operations.slice(0, 1), [tasks.operations])
 
   useEffect(() => {
+    if (!sessionRunning && !drainingTasks) {
+      setTasks(EMPTY_UNIVER_TASKS)
+      return
+    }
     let disposed = false
     let polling = false
     const pollTasks = async () => {
@@ -2906,6 +3092,25 @@ function UniverView(props: ConvViewProps) {
             : [],
         }
         setTasks(nextTasks)
+        if (sessionRunning) {
+          emptyDrainPollsRef.current = 0
+        } else {
+          const remoteEmpty = nextTasks.operations.length === 0
+            && nextTasks.codeRequests.length === 0
+            && nextTasks.sheetScreenshotRequests.length === 0
+            && nextTasks.docScreenshotRequests.length === 0
+            && nextTasks.slideScreenshotRequests.length === 0
+          const sessionQueuePrefix = `${props.sessionId}:`
+          const localBusy = residentCodeRequestsInFlight.size > 0
+            || [...residentRuntimeTaskQueues.keys()].some((key) => key.startsWith(sessionQueuePrefix))
+          if (remoteEmpty && !localBusy) {
+            emptyDrainPollsRef.current += 1
+            if (emptyDrainPollsRef.current >= 2) setDrainingTasks(false)
+          } else {
+            emptyDrainPollsRef.current = 0
+            setDrainingTasks(true)
+          }
+        }
         const target = nextTasks.operations[0]?.unitType
           ?? nextTasks.codeRequests[0]?.unitType
           ?? (nextTasks.sheetScreenshotRequests.length > 0 ? 'sheet' : undefined)
@@ -2928,7 +3133,11 @@ function UniverView(props: ConvViewProps) {
       window.clearInterval(timer)
       setTasks(EMPTY_UNIVER_TASKS)
     }
-  }, [props.sessionId])
+  }, [props.sessionId, sessionRunning, drainingTasks])
+
+  useEffect(() => {
+    for (const request of tasks.codeRequests) void executeResidentCodeRequest(props.sessionId, request)
+  }, [props.sessionId, tasks.codeRequests])
 
   useEffect(() => {
     const remembered = selectedUnitBySession.get(props.sessionId)
@@ -2960,17 +3169,49 @@ function UniverView(props: ConvViewProps) {
   )
 }
 
+function UniverViewHost(props: ConvViewProps) {
+  const hostRef = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (host === null) return
+    const shell = getResidentViewShell(props.sessionId)
+    host.appendChild(shell)
+    window.dispatchEvent(new Event('resize'))
+    return () => {
+      if (residentViewShells.get(props.sessionId) === shell) getResidentRuntimeParkingHost().appendChild(shell)
+    }
+  }, [props.sessionId])
+  return <section ref={hostRef} className="dsh-univer-create-view-host" aria-label="Univer" />
+}
+
 export const inject = ['slots', 'connection']
 
 export function apply(ctx: ClientContext): void {
   clientConnection.current = ctx.get('connection') as unknown as ConnectionHandle
   ctx.effect(() => () => {
+    currentResidentSessionId = null
+    residentCodeRequestsInFlight.clear()
+    residentRuntimeTaskQueues.clear()
+    for (const entry of residentRuntimes.values()) {
+      entry.runtime.univer.dispose()
+      entry.runtime.mount.remove()
+    }
+    residentRuntimes.clear()
+    for (const shell of residentViewShells.values()) shell.remove()
+    residentViewShells.clear()
+    residentRuntimeParkingHost?.remove()
+    residentRuntimeParkingHost = null
     clientConnection.current = null
-  }, 'dsh-univer-create: client connection')
+  }, 'dsh-univer-create: client connection and resident runtimes')
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'univer-runtime-session-tracker',
+    order: 10_000,
+  }, UniverSessionRuntimeTracker))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view',
     id: 'univer-create',
     label: 'Univer',
     order: 20,
-  }, UniverView))
+  }, UniverViewHost))
 }

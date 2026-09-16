@@ -42,7 +42,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "bundle": "tsdown --config tsdown.config.ts",
-    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs && node --test tests/*.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/runtimes/sheet.js && node --check lib/runtimes/docs.js && node --check lib/runtimes/slides.js && node --check server/export-file.mjs && node --check server/normalize-slides.mjs && node --test tests/*.test.mjs",
     "build": "pnpm typecheck && pnpm bundle && pnpm check",
     "watch": "tsdown --config tsdown.config.ts --watch",
     "clean": "rm -rf lib",
@@ -75,6 +75,8 @@
     "@univerjs-pro/sheets-chart-ui": "1.0.0-rc.0",
     "@univerjs-pro/sheets-print": "1.0.0-rc.0",
     "@univerjs-pro/slides": "1.0.0-rc.0",
+    "@univerjs-pro/slides-chart": "1.0.0-rc.0",
+    "@univerjs-pro/slides-chart-ui": "1.0.0-rc.0",
     "@univerjs-pro/slides-ui": "1.0.0-rc.0",
     "@univerjs/core": "1.0.0-rc.0",
     "@univerjs/design": "1.0.0-rc.0",

@@ -47,6 +47,12 @@ importers:
       '@univerjs-pro/slides':
         specifier: 1.0.0-rc.0
         version: 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/slides-chart':
+        specifier: 1.0.0-rc.0
+        version: 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/slides-chart-ui':
+        specifier: 1.0.0-rc.0
+        version: 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)
       '@univerjs-pro/slides-ui':
         specifier: 1.0.0-rc.0
         version: 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)
@@ -1625,6 +1631,12 @@ packages:
 
   '@univerjs-pro/sheets-shape@1.0.0-rc.0':
     resolution: {integrity: sha512-Cvdu7ajh4UBpUG7IVl53cI63kmew5rs0uU+/oqeDKYMK/EZHRKIMcvv0b4VfYPfagT76q/HuvnMK9HsRwtkL1g==}
+
+  '@univerjs-pro/slides-chart-ui@1.0.0-rc.0':
+    resolution: {integrity: sha512-0KUXp/u/DdeT8JeogSDES5LxoZ/5qeSnJvnCl0t+bn1yDwrCbeypcHX2tbtz5ejSK35wOlNxPjvIJ4f4upGDiw==}
+    peerDependencies:
+      react: ^16.9.0 || ^17.0.0 || ^18.0.0 || ^19.0.0 || ^19.0.0-rc
+      rxjs: '>=7.0.0'
 
   '@univerjs-pro/slides-chart@1.0.0-rc.0':
     resolution: {integrity: sha512-u7f0DEUX7Yx8uzDn60hrXJFyJMC+KN5Y8Y9acT27PuJOWLL0FbfqK1695PkBZOlC59HrdeI99U7N1b/+oPPlUQ==}
@@ -4557,6 +4569,27 @@ snapshots:
     transitivePeerDependencies:
       - react
       - rxjs
+
+  '@univerjs-pro/slides-chart-ui@1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)':
+    dependencies:
+      '@univerjs-pro/chart-ui': 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/engine-chart': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/engine-shape': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/license': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/slides': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/slides-chart': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs-pro/slides-ui': 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs/core': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs/design': 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@univerjs/engine-render': 1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)
+      '@univerjs/icons': 1.38.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@univerjs/ui': 1.0.0-rc.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rxjs@7.8.2)
+      react: 18.3.1
+      rxjs: 7.8.2
+    transitivePeerDependencies:
+      - '@types/react'
+      - '@types/react-dom'
+      - react-dom
 
   '@univerjs-pro/slides-chart@1.0.0-rc.0(react@18.3.1)(rxjs@7.8.2)':
     dependencies:

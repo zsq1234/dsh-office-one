@@ -6,6 +6,7 @@ import { chmod, lstat, realpath, rename, stat, unlink, writeFile } from 'node:fs
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
+import { normalizeSlides } from '../../../server/normalize-slides.mjs'
 
 export const name = 'dsh-univer-create'
 export const inject = ['tools', 'connection', 'storageDomain', 'workspaceRegistry', 'attachments']
@@ -350,6 +351,7 @@ async function workspaceTarget(root: string, input: string, expectedExtension: s
 
 async function exportOfficeFile(data: unknown, unitType: keyof typeof FILE_FORMATS): Promise<Buffer> {
   const format = FILE_FORMATS[unitType]
+  if (unitType === 'slide') normalizeSlides(data)
   const response = await fetch(UNIVER_EXPORT_ENDPOINT, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -409,13 +411,6 @@ export function apply(ctx: Context): void {
   const activeSlideSessions = new Map<string, number>()
   const apiReference = createStandardApiReference()
   let lastOperationCreatedAt = 0
-  const requireActiveSlide = (sessionId: string) => {
-    const lastSeen = activeSlideSessions.get(sessionId)
-    if (lastSeen === undefined || Date.now() - lastSeen > 2_500) {
-      activeSlideSessions.delete(sessionId)
-      throw new Error('请先打开当前会话的 Univer → Slide 页面，再调用 Slide 工具')
-    }
-  }
 
   const updateWorkbookRow = async (
     storageKey: string,
@@ -620,7 +615,7 @@ export function apply(ctx: Context): void {
       if (ids.size === 0) return
       await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
     }
-    throw new Error(`${unitType} 仍有待处理操作，无法安全读取最新已应用数据；请保持对应 Univer 页面打开并重试`)
+    throw new Error(`${unitType} 仍有待处理操作，无法安全读取最新已应用数据；请保持当前 DSH 页面打开并重试`)
   }
 
   let disposed = false
@@ -1092,7 +1087,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'univer_execute_code',
-    description: 'Execute JavaScript against the active Univer editor in this conversation browser. First query univer_api_reference. The supported contract injects only `univerAPI` (FUniver Facade) and a captured `console`; obtain objects through getActiveWorkbook(), getActiveDocument(), or getActivePresentation(). Do not use imports, DOM/browser globals, raw Univer internals, injector/model access, or TypeScript syntax. Async code and await are supported. Return a JSON-serializable value for inspection. The target Univer tab must be open and the requested unit must already exist. This is trusted same-page execution, not a security sandbox. Under the Ask permission preset it requests approval; under Full Access it executes automatically.',
+    description: 'Execute JavaScript against an existing Univer editor runtime in this conversation browser. First query univer_api_reference. The supported contract injects only `univerAPI` (FUniver Facade) and a captured `console`; obtain objects through getActiveWorkbook(), getActiveDocument(), or getActivePresentation(). Do not use imports, DOM/browser globals, raw Univer internals, injector/model access, or TypeScript syntax. Async code and await are supported. Return a JSON-serializable value for inspection. The requested unit must already have been created in the current session; switching between Chat, Trajectory, Univer, and Performance tabs is supported after its runtime exists. This is trusted same-page execution, not a security sandbox. Under the Ask permission preset it requests approval; under Full Access it executes automatically.',
     parameters: {
       unitType: { type: 'string', enum: ['sheet', 'doc', 'slide'], required: true, description: 'Target active Univer unit.' },
       code: { type: 'string', required: true, description: 'JavaScript function body. `univerAPI` is the only injected Univer binding. Use `return` to send a result back.' },
@@ -1146,7 +1141,7 @@ export function apply(ctx: Context): void {
         if (univerCodeRequests.get(sessionId)?.size === 0) univerCodeRequests.delete(sessionId)
         univerCodeResults.delete(request.id)
       }
-      if (result === undefined) throw new Error('浏览器执行超时。请保持当前会话的 Univer 页签打开，并确认目标文档已创建。')
+      if (result === undefined) throw new Error('浏览器执行超时。请保持当前 DSH 页面打开，并确认当前会话中目标 Univer 文档已创建且 runtime 仍存在。')
       if (result.error !== undefined) throw new Error(`浏览器执行失败：${result.error}${result.logs?.length ? `\n${result.logs.join('\n')}` : ''}`)
       return {
         ok: true,
@@ -1342,7 +1337,7 @@ export function apply(ctx: Context): void {
         if (sheetScreenshotRequests.get(sessionId)?.size === 0) sheetScreenshotRequests.delete(sessionId)
         sheetScreenshotResults.delete(request.id)
       }
-      if (result === undefined) throw new Error('工作表截图超时。请打开当前会话的 Univer → Sheet 页签后重试。')
+      if (result === undefined) throw new Error('工作表截图超时。请保持当前 DSH 页面打开，并确认该会话的 Sheet runtime 已创建。')
       if (result.error !== undefined) throw new Error(`浏览器工作表截图失败：${result.error}`)
       const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
       if (match === null) throw new Error('浏览器返回的工作表截图不是有效 PNG data URL')
@@ -1432,7 +1427,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'univer_doc_screenshot',
-    description: 'Capture the currently rendered Univer document viewport as a PNG and return it to the model for visual inspection. Use after editing to check hierarchy, spacing, clipping, and page layout. The Univer Doc tab must be initialized in the browser.',
+    description: 'Capture the currently rendered Univer document viewport as a PNG and return it to the model for visual inspection. Use after editing to check hierarchy, spacing, clipping, and page layout. The Univer Doc runtime must already exist in the current browser session; switching conversation tabs is supported.',
     parameters: {
       mode: { type: 'string', enum: ['document', 'editor'], description: 'document returns the rendered document canvas; editor is reserved for editor diagnostics. Defaults to document.' },
       scroll: { type: 'string', enum: ['none', 'up', 'down', 'top', 'bottom'], description: 'Scroll the document before capturing. Defaults to none. Use repeated down screenshots to inspect the document progressively.' },
@@ -1503,7 +1498,7 @@ export function apply(ctx: Context): void {
         if (docScreenshotRequests.get(sessionId)?.size === 0) docScreenshotRequests.delete(sessionId)
         docScreenshotResults.delete(request.id)
       }
-      if (result === undefined) throw new Error('文档截图超时。请打开当前会话的 Univer → Doc 页签后重试。')
+      if (result === undefined) throw new Error('文档截图超时。请保持当前 DSH 页面打开，并确认该会话的 Doc runtime 已创建。')
       if (result.error !== undefined) throw new Error(`浏览器文档截图失败：${result.error}`)
       const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
       if (match === null) throw new Error('浏览器返回的文档截图不是有效 PNG data URL')
@@ -1631,7 +1626,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'univer_slide_screenshot',
-    description: 'Capture a rendered PNG of one slide and return the image to the model for visual inspection. Use after creating or changing slides to check overlap, clipping, hierarchy, contrast, and whitespace. The Univer Slide tab must be open in the browser.',
+    description: 'Capture a rendered PNG of one slide and return the image to the model for visual inspection. Use after creating or changing slides to check overlap, clipping, hierarchy, contrast, and whitespace. The Univer Slide runtime must already exist in the current browser session; switching conversation tabs is supported.',
     parameters: {
       slideIndex: { type: 'integer', description: 'Zero-based slide index. Defaults to 0.' },
       mode: { type: 'string', enum: ['slide', 'editor'], description: 'slide returns the clean rendered canvas; editor is intended for editor-render diagnostics. Defaults to slide.' },
@@ -1667,7 +1662,6 @@ export function apply(ctx: Context): void {
     async execute(args, exec) {
       const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取幻灯片')
-      requireActiveSlide(sessionId)
       await waitForOperationQueueEmpty(sessionId, 'slide', exec.signal)
       const slideIndex = args.slideIndex ?? 0
       if (!Number.isInteger(slideIndex) || slideIndex < 0) throw new Error('slideIndex 必须是非负整数')
@@ -1695,7 +1689,7 @@ export function apply(ctx: Context): void {
         if (slideScreenshotRequests.get(sessionId)?.size === 0) slideScreenshotRequests.delete(sessionId)
         slideScreenshotResults.delete(request.id)
       }
-      if (result === undefined) throw new Error('截图超时。请保持 Univer Slide 页签打开并重试。')
+      if (result === undefined) throw new Error('截图超时。请保持当前 DSH 页面打开，并确认该会话的 Slide runtime 已创建。')
       if (result.error !== undefined) throw new Error(`浏览器截图失败：${result.error}`)
       const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
       if (match === null) throw new Error('浏览器返回的截图不是有效 PNG data URL')
