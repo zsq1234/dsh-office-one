@@ -177,7 +177,7 @@ Slide 保留三个核心工具：
 
 执行器支持普通 JavaScript、循环和 `await`，代码中的 `return` 值及 `console` 输出会返回给 AI。不要写 TypeScript 类型、`import`、DOM 操作、网络请求、浏览器存储访问、Univer injector/model 或其他内部 API。枚举优先从 `univerAPI.Enum` 获取。
 
-Sheet 运行时已注册完整的 Chart 模型、渲染/UI 插件与 Facade mixin。代码执行器和 Workspace 表格编辑器均可使用 `FWorksheet.newChart()`、`insertChart()`、`getChart()`、`getCharts()`，以及图表 builder、实时 `FChart` 操作和 `exportImage()`；图表类型和数据方向可从 `univerAPI.Enum.ChartTypeString`、`ChartSourceOrientation` 等枚举获取。调用前仍应先用 `univer_api_reference` 查询具体签名。
+Sheet 运行时已注册完整的 Chart 模型、渲染/UI 插件与 Facade mixin。代码执行器和 Workspace 表格编辑器均可使用 `FWorksheet.newChart()`、`insertChart()`、`getChart()`、`getCharts()`，以及图表 builder、实时 `FChart` 操作和 `exportImage()`。Slide 运行时也已注册 Chart 模型、渲染/UI 插件、中文语言包与 Facade mixin；工具栏的 Chart 菜单可打开插入面板，也可通过 `FSlide.newChart()`、`insertChart()`、`getChart()` 和 `getCharts()` 创建及操作幻灯片图表。图表类型和数据方向可从 `univerAPI.Enum.ChartTypeString`、`ChartSourceOrientation` 等枚举获取；调用前仍应先用 `univer_api_reference` 查询具体签名。
 
 代码执行完成后，插件会立即保存当前 Univer 快照。目标 Sheet、Doc 或 Slide 必须已经创建，并保持当前会话的 **Univer** 页签打开；收到执行请求时界面会自动切换到目标产品。
 
