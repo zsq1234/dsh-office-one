@@ -7,30 +7,40 @@ import { getDocsEmptySnapshot, LocaleType, mergeLocales, Univer } from '@univerj
 import { FUniver } from '@univerjs/core/facade'
 import { createUniver, defaultTheme } from '@univerjs/presets'
 import { UniverDocsCorePreset } from '@univerjs/preset-docs-core'
+import UniverPresetDocsCoreEnUS from '@univerjs/preset-docs-core/locales/en-US'
 import UniverPresetDocsCoreZhCN from '@univerjs/preset-docs-core/locales/zh-CN'
 import { UniverDocsDrawingPreset } from '@univerjs/preset-docs-drawing'
+import UniverPresetDocsDrawingEnUS from '@univerjs/preset-docs-drawing/locales/en-US'
 import UniverPresetDocsDrawingZhCN from '@univerjs/preset-docs-drawing/locales/zh-CN'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
+import UniverPresetSheetsCoreEnUS from '@univerjs/preset-sheets-core/locales/en-US'
 import UniverPresetSheetsCoreZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import { UniverDocsPlugin } from '@univerjs/docs'
 import { UniverDocsUIPlugin } from '@univerjs/docs-ui'
+import DocsUIEnUS from '@univerjs/docs-ui/locale/en-US'
 import DocsUIZhCN from '@univerjs/docs-ui/locale/zh-CN'
 import { UniverDrawingPlugin } from '@univerjs/drawing'
 import { UniverRenderEnginePlugin } from '@univerjs/engine-render'
 import { UniverUIPlugin } from '@univerjs/ui'
+import UIEnUS from '@univerjs/ui/locale/en-US'
 import UIZhCN from '@univerjs/ui/locale/zh-CN'
+import DesignEnUS from '@univerjs/design/locale/en-US'
 import DesignZhCN from '@univerjs/design/locale/zh-CN'
+import ChartUIEnUS from '@univerjs-pro/chart-ui/locale/en-US'
 import ChartUIZhCN from '@univerjs-pro/chart-ui/locale/zh-CN'
 import { UniverDocsTablePlugin } from '@univerjs-pro/docs-table'
 import { UniverLicensePlugin } from '@univerjs-pro/license'
 import { UniverSheetsChartPlugin } from '@univerjs-pro/sheets-chart'
 import { UniverSheetsChartUIPlugin } from '@univerjs-pro/sheets-chart-ui'
+import SheetsChartUIEnUS from '@univerjs-pro/sheets-chart-ui/locale/en-US'
 import SheetsChartUIZhCN from '@univerjs-pro/sheets-chart-ui/locale/zh-CN'
 import { UNIVER_LICENSE } from 'virtual:dsh-univer-license'
+import ShapeEditorUIEnUS from '@univerjs-pro/shape-editor-ui/locale/en-US'
 import ShapeEditorUIZhCN from '@univerjs-pro/shape-editor-ui/locale/zh-CN'
 import { getSlidesEmptySnapshot, PageElementTypeEnum, UniverSlidesPlugin } from '@univerjs-pro/slides'
 import { UniverSlidesChartPlugin } from '@univerjs-pro/slides-chart'
 import { UniverSlidesChartUIPlugin } from '@univerjs-pro/slides-chart-ui'
+import SlidesChartUIEnUS from '@univerjs-pro/slides-chart-ui/locale/en-US'
 import SlidesChartUIZhCN from '@univerjs-pro/slides-chart-ui/locale/zh-CN'
 import { installScrollContainment } from './scroll-containment.js'
 import type { ISlideData, ISlideTextElement } from '@univerjs-pro/slides'
@@ -43,7 +53,9 @@ import '@univerjs-pro/sheets-chart/facade'
 import '@univerjs-pro/slides/facade'
 import '@univerjs-pro/slides-chart/facade'
 import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
+import SlidesUIEnUS from '@univerjs-pro/slides-ui/locale/en-US'
 import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
+import { useDshLanguage } from '../../../dsh-language.js'
 
 import '@univerjs/preset-docs-core/lib/index.css'
 import '@univerjs/preset-docs-drawing/lib/index.css'
@@ -57,6 +69,25 @@ import '@univerjs/docs-ui/lib/index.css'
 import '@univerjs-pro/shape-editor-ui/lib/index.css'
 import '@univerjs-pro/slides-ui/lib/index.css'
 import './styles.css'
+
+function univerLocale(language: ReturnType<typeof useDshLanguage>): LocaleType {
+  return language === 'zh' ? LocaleType.ZH_CN : LocaleType.EN_US
+}
+
+const SHEET_LOCALES = {
+  [LocaleType.EN_US]: mergeLocales(UniverPresetSheetsCoreEnUS, ChartUIEnUS, SheetsChartUIEnUS),
+  [LocaleType.ZH_CN]: mergeLocales(UniverPresetSheetsCoreZhCN, ChartUIZhCN, SheetsChartUIZhCN),
+}
+
+const DOC_LOCALES = {
+  [LocaleType.EN_US]: mergeLocales(UniverPresetDocsCoreEnUS, UniverPresetDocsDrawingEnUS),
+  [LocaleType.ZH_CN]: mergeLocales(UniverPresetDocsCoreZhCN, UniverPresetDocsDrawingZhCN),
+}
+
+const SLIDE_LOCALES = {
+  [LocaleType.EN_US]: mergeLocales(DesignEnUS, UIEnUS, DocsUIEnUS, ShapeEditorUIEnUS, SlidesUIEnUS, ChartUIEnUS, SlidesChartUIEnUS),
+  [LocaleType.ZH_CN]: mergeLocales(DesignZhCN, UIZhCN, DocsUIZhCN, ShapeEditorUIZhCN, SlidesUIZhCN, ChartUIZhCN, SlidesChartUIZhCN),
+}
 
 type JsonScalar = string | number | boolean | null
 
@@ -1276,6 +1307,8 @@ const openedWorkbookSessions = new Set<string>()
 
 function SheetProductView(props: ProductViewProps) {
   const { sessionId } = props
+  const language = useDshLanguage()
+  const locale = univerLocale(language)
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedSheetOperation).filter((item): item is SheetOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
@@ -1285,6 +1318,7 @@ function SheetProductView(props: ProductViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'sheet'))
+  useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话表格')
@@ -1398,10 +1432,8 @@ function SheetProductView(props: ProductViewProps) {
       mount.className = 'dsh-univer-create-runtime-host'
       container.appendChild(mount)
       const runtime = createUniver({
-        locale: LocaleType.ZH_CN,
-        locales: {
-          [LocaleType.ZH_CN]: mergeLocales(UniverPresetSheetsCoreZhCN, ChartUIZhCN, SheetsChartUIZhCN),
-        },
+        locale,
+        locales: SHEET_LOCALES,
         theme: defaultTheme,
         presets: [UniverSheetsCorePreset({ container: mount })],
         plugins: [
@@ -1552,7 +1584,7 @@ function SheetProductView(props: ProductViewProps) {
     }
 
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId, locale])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1867,6 +1899,8 @@ const openedDocumentSessions = new Set<string>()
 
 function DocProductView(props: ProductViewProps) {
   const { sessionId } = props
+  const language = useDshLanguage()
+  const locale = univerLocale(language)
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedDocOperation).filter((item): item is DocOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
@@ -1876,6 +1910,7 @@ function DocProductView(props: ProductViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'doc'))
+  useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话文档')
@@ -1982,10 +2017,8 @@ function DocProductView(props: ProductViewProps) {
       mount.className = 'dsh-univer-create-runtime-host'
       container.appendChild(mount)
       const runtime = createUniver({
-        locale: LocaleType.ZH_CN,
-        locales: {
-          [LocaleType.ZH_CN]: mergeLocales(UniverPresetDocsCoreZhCN, UniverPresetDocsDrawingZhCN),
-        },
+        locale,
+        locales: DOC_LOCALES,
         theme: defaultTheme,
         presets: [
           UniverDocsCorePreset({ container: mount }),
@@ -2102,7 +2135,7 @@ function DocProductView(props: ProductViewProps) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId, locale])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -2422,6 +2455,8 @@ async function captureRenderedSlide(
 
 function SlideProductView(props: ProductViewProps) {
   const { sessionId } = props
+  const language = useDshLanguage()
+  const locale = univerLocale(language)
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedSlideOperation).filter((item): item is SlideOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
@@ -2431,6 +2466,7 @@ function SlideProductView(props: ProductViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedSlideRuntime | null>(getResidentRuntime<MountedSlideRuntime>(sessionId, 'slide'))
+  useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话演示文稿')
@@ -2561,10 +2597,8 @@ function SlideProductView(props: ProductViewProps) {
       container.appendChild(mount)
 
       const univer = new Univer({
-        locale: LocaleType.ZH_CN,
-        locales: {
-          [LocaleType.ZH_CN]: mergeLocales(DesignZhCN, UIZhCN, DocsUIZhCN, ShapeEditorUIZhCN, SlidesUIZhCN, ChartUIZhCN, SlidesChartUIZhCN),
-        },
+        locale,
+        locales: SLIDE_LOCALES,
       })
       univer.registerPlugin(UniverRenderEnginePlugin)
       univer.registerPlugin(UniverUIPlugin, { container: mount })
@@ -2780,7 +2814,7 @@ function SlideProductView(props: ProductViewProps) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId, locale])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

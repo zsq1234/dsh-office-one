@@ -62,3 +62,17 @@ test('Univer products wait for session initialization before mounting', async ()
 
   assert.equal(initializers.length, 3)
 })
+
+test('Univer follows DSH zh/en language and falls back to English', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const runtimes = await Promise.all(['sheet', 'docs', 'slides'].map((name) => readFile(new URL(`../lib/runtimes/${name}.js`, import.meta.url), 'utf8')))
+
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-locale'))
+  assert.ok(client.includes('dsh-office-one: DSH locale bridge'))
+  assert.match(client, /value === ["']zh["'] \? ["']zh["'] : ["']en["']/)
+  for (const code of runtimes) {
+    assert.ok(code.includes('enUS'))
+    assert.ok(code.includes('zhCN'))
+  }
+})
