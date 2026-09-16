@@ -17,7 +17,7 @@ test('AI-created slides use the blank layout and suppress inherited placeholders
 test('slide screenshots use rendered canvases while keeping the React chat overlay', () => {
   assert.match(client, /querySelectorAll\('canvas'\)/)
   assert.match(client, /toDataURL\('image\/png'\)/)
-  assert.match(client, /'slide-screenshot-requests'/)
+  assert.match(client, /props\.slideScreenshotRequests/)
   assert.match(client, /'slide-screenshot-result'/)
 
   const slideStart = client.indexOf('function SlideProductView(')
@@ -51,12 +51,26 @@ test('scroll containment confines Univer scrolling to the mount point', () => {
   assert.match(containment, /container\.contains\(this\)/)
 })
 
+test('sheet screenshots support canvas capture and two-axis AI scrolling', () => {
+  assert.match(client, /function captureRenderedSheet/)
+  assert.match(client, /sheet-screenshot-result/)
+  assert.match(client, /deltaX/)
+  assert.match(client, /deltaY/)
+  assert.match(host, /name: 'univer_sheet_screenshot'/)
+  assert.match(host, /atStart/)
+  assert.match(host, /atEnd/)
+})
+
 test('document screenshots use the rendered Univer canvas and attachment output', () => {
   assert.match(client, /function captureRenderedDocument/)
-  assert.match(client, /'doc-screenshot-requests'/)
+  assert.match(client, /props\.docScreenshotRequests/)
   assert.match(client, /'doc-screenshot-result'/)
   assert.match(host, /name: 'univer_doc_screenshot'/)
   assert.match(host, /action: 'doc-screenshot'/)
+  assert.match(host, /enum: \['none', 'up', 'down', 'top', 'bottom'\]/)
+  assert.match(client, /function findDocumentScroller/)
+  assert.match(client, /scroller\.scrollTo/)
+  assert.match(host, /atBottom/)
 })
 
 test('host exposes visual screenshot tool and richer layout metadata', () => {

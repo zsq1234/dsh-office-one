@@ -49,6 +49,14 @@
 1. 用户在 Univer 界面中手动编辑。
 2. 在对话中告诉 AI 要创建或修改什么，由 AI 调用插件工具操作当前文档。
 
+插件只暴露 11 个核心工具：三个产品的创建工具、Host 侧读取工具、Doc/Slide 截图工具，以及 Facade API 查询和代码执行器。创建操作使用会话级持久化队列，常规编辑统一通过 `univer_execute_code` 完成。浏览器仅通过一个会话级 `tasks` 轮询获取创建操作、Facade 代码请求和 Doc/Slide 截图请求；各产品页不再分别轮询，Slide 活动状态也随该请求上报。工具结果中的状态含义如下：
+
+- `queued`：操作已经可靠进入队列，等待浏览器编辑器应用。
+- `applied`：读取或代码操作基于已经提交的快照完成。
+- `rendered`：截图等视觉操作已经由可见编辑器完成实际渲染。
+
+Host 侧读取不要求源产品页保持打开；截图和 `univer_execute_code` 依赖真实浏览器 Runtime，执行时界面会切换到目标产品。若创建操作仍在排队，后续读取会等待队列提交，而不会把旧快照标记为 `applied` 返回。
+
 ### 使用 Sheet
 
 可以点击：
@@ -79,14 +87,14 @@ reports/sales-report.xlsx
 新建一个名为“汇总”的工作表，把当前数据整理成月度汇总。
 ```
 
-Sheet 工具支持的主要能力包括：
+Sheet 保留四个核心工具：
 
-- 新建或重置工作簿。
-- 新增、删除、重命名和列出工作表。
-- 按 A1 地址读取、写入或清空单元格区域。
-- 设置背景色、字体颜色、粗体和字号。
-- 写入数字、字符串、布尔值、空值和以 `=` 开头的公式。
-- 子代理调用写入工具时，操作会排入父会话队列，由父会话的 Sheet 页面应用并持久化；因此可将不同区域的数据整理任务并行委派给多个子代理。
+- `univer_sheet_new`：新建或重置工作簿。
+- `univer_sheet_list`：从已提交快照列出工作表。
+- `univer_sheet_get_range`：按 A1 地址读取数据。
+- `univer_sheet_screenshot`：截取真实工作表 Canvas；支持 `up/down/left/right/top/bottom/start/end` 滚动，AI 可连续截图检查大表的排版、格式和数据区域。
+
+新增、删除或重命名工作表，以及写入、清空、格式化区域等编辑操作，统一由 `univer_execute_code` 调用 `FWorkbook`、`FWorksheet` 和 `FRange` Facade 完成。
 
 ### 使用 Doc
 
@@ -110,14 +118,13 @@ Sheet 工具支持的主要能力包括：
 把当前文档前 20 个字符设置为粗体，字号改成 18。
 ```
 
-Doc 工具支持的主要能力包括：
+Doc 保留三个核心工具：
 
-- 新建或重置文档。
-- 读取和替换全部纯文本。
-- 按零起始字符位置插入、追加或删除文本。
-- 对指定字符范围设置粗体、斜体、字号和文字颜色。
-- 使用 `univer_doc_screenshot` 截取当前文档可视区域的真实 Univer Canvas，返回给支持图片输入的模型检查标题层级、间距、裁切、对齐和页面留白。
-- 代码执行器可通过已注册的 Docs Table Facade 使用 `insertTable`、`insertTableFromData`、`getTables`、`findTableByText`，并从 `univerAPI.Enum.DocsTableInsertTablePosition` 获取插入位置枚举。
+- `univer_doc_new`：新建或重置文档。
+- `univer_doc_get_text`：从已提交快照读取纯文本。
+- `univer_doc_screenshot`：截取真实 Univer Canvas，用于检查标题层级、间距、裁切、对齐和页面留白。支持 `scroll: none | up | down | top | bottom` 和可选 `amount`，AI 可以反复向下滚动并截图，直到返回 `atBottom: true`。
+
+替换、插入、追加、删除和格式化文本统一由 `univer_execute_code` 调用 `FDocument`、`FTextRange` 完成。代码执行器也可通过 Docs Table Facade 使用 `insertTable`、`insertTableFromData`、`getTables`、`findTableByText`。
 
 字符范围采用零起始、左闭右开形式。例如 `start=0, end=5` 表示前 5 个字符。
 
@@ -143,16 +150,13 @@ Doc 工具支持的主要能力包括：
 在第 1 页坐标 left=120、top=100 的位置添加标题“季度总结”，字号 36，加粗。
 ```
 
-Slide 工具支持的主要能力包括：
+Slide 保留三个核心工具：
 
-- 新建或重置演示文稿；AI 新建的页面默认使用空白版式，不显示标题/正文占位符。
-- 列出幻灯片、页面尺寸以及元素的位置、尺寸和主要文字样式。
-- 添加或删除幻灯片。
-- 添加文本元素。
-- 添加可编辑形状（矩形、圆角矩形、椭圆、菱形、三角形、平行四边形、六边形、星形等），支持填充色、轮廓色、轮廓宽度、透明度和无轮廓设置。
-- 根据元素 ID 修改文本、位置、尺寸、字号、颜色和粗体。
-- 根据元素 ID 删除元素。
-- 将指定页面的真实 Univer 渲染画布截成 PNG 返回给支持图片输入的模型，供 AI 检查重叠、裁切、层级、对齐、对比度和留白。
+- `univer_slide_new`：新建或重置演示文稿；AI 新建的页面默认使用空白版式。
+- `univer_slide_list`：从已提交快照列出页面、元素、位置、尺寸和主要文字样式。
+- `univer_slide_screenshot`：将指定页面的真实渲染画布截成 PNG。
+
+添加或删除幻灯片，以及新增、修改、删除文本和形状等编辑操作，统一由 `univer_execute_code` 调用 Slide 和 Shape Facade 完成。
 
 更新或删除元素前，应先让 AI 列出当前幻灯片，取得正确的元素 ID。完成一页或一轮排版后，可让 AI 调用 `univer_slide_screenshot` 做视觉自检，再根据截图继续调整。
 
@@ -160,7 +164,7 @@ Slide 工具支持的主要能力包括：
 
 ### 使用 Facade API 参考与 JavaScript 执行器
 
-当固定的 Sheet、Doc、Slide 工具无法表达复杂批量操作时，可以让 AI 使用以下两个工具：
+除创建、Host 侧读取和截图外，Sheet、Doc、Slide 的常规编辑统一使用以下两个工具：
 
 - `univer_api_reference`：查询与插件匹配的 Univer Facade API。推荐先用 `action=find` 和关键词发现 API，再用 `action=show` 查看准确签名、示例、空值约束和相关类型。
 - `univer_execute_code`：在当前会话的浏览器页面执行 JavaScript。执行环境只注入 `univerAPI`（`FUniver` Facade）和受控 `console`；代码应通过 `univerAPI.getActiveWorkbook()`、`getActiveDocument()` 或 `getActivePresentation()` 获取当前对象。

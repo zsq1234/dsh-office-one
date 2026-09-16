@@ -15,11 +15,22 @@ const queuedSheetOperationSchema = z.object({
   operation: z.record(z.string(), z.unknown()),
 })
 
+const queuedOperationSchema = z.object({
+  id: z.string(),
+  unitType: z.enum(['sheet', 'doc', 'slide']),
+  operation: z.record(z.string(), z.unknown()),
+  createdAt: z.number(),
+  claimedBy: z.string().optional(),
+  claimedAt: z.number().optional(),
+})
+
 const workbookRowSchema = z.object({
   snapshot: z.unknown(),
   updatedAt: z.number(),
   filePath: z.string().nullable().optional(),
+  queuedOperations: z.array(queuedOperationSchema).optional(),
   queuedSheetOperations: z.array(queuedSheetOperationSchema).optional(),
+  revision: z.number().int().optional(),
 })
 
 interface SlideScreenshotRequest {
@@ -29,9 +40,19 @@ interface SlideScreenshotRequest {
   createdAt: number
 }
 
+interface SheetScreenshotRequest {
+  id: string
+  mode: 'sheet' | 'editor'
+  scroll: 'none' | 'up' | 'down' | 'left' | 'right' | 'top' | 'bottom' | 'start' | 'end'
+  amount?: number
+  createdAt: number
+}
+
 interface DocScreenshotRequest {
   id: string
   mode: 'document' | 'editor'
+  scroll: 'none' | 'up' | 'down' | 'top' | 'bottom'
+  amount?: number
   createdAt: number
 }
 
@@ -39,6 +60,12 @@ interface SlideScreenshotResult {
   dataUrl?: string
   width?: number
   height?: number
+  scrollTop?: number
+  scrollHeight?: number
+  viewportHeight?: number
+  scrollLeft?: number
+  scrollWidth?: number
+  viewportWidth?: number
   error?: string
 }
 
@@ -69,6 +96,8 @@ const successSchema = {
   properties: {
     ok: { type: 'boolean', required: true },
     action: { type: 'string', required: true },
+    status: { type: 'string', enum: ['queued'], required: true },
+    operationId: { type: 'string', required: true },
     message: { type: 'string', required: true },
   },
   additionalProperties: false,
@@ -76,8 +105,8 @@ const successSchema = {
 
 const output = {
   schema: successSchema,
-  render: (_args: unknown, value: { ok: boolean; action: string; message: string }) => [
-    { type: 'text' as const, text: value.message },
+  render: (_args: unknown, value: { ok: boolean; action: string; status: 'queued'; operationId: string; message: string }) => [
+    { type: 'text' as const, text: `${value.message} (queued: ${value.operationId})` },
   ],
 }
 
@@ -106,6 +135,26 @@ type ScreenshotImageValue = {
 
 type CellValue = string | number | boolean | null
 type QueuedSheetOperation = z.infer<typeof queuedSheetOperationSchema>
+type QueuedOperation = z.infer<typeof queuedOperationSchema>
+type UniverUnitType = QueuedOperation['unitType']
+type WorkbookRow = z.infer<typeof workbookRowSchema>
+
+const OPERATION_LEASE_MS = 30_000
+const MAX_PENDING_OPERATIONS = 2_000
+const UNIT_TYPES: UniverUnitType[] = ['sheet', 'doc', 'slide']
+
+function storageKeyForUnit(sessionId: string, unitType: UniverUnitType): string {
+  return unitType === 'sheet' ? sessionId : `${sessionId}:${unitType}`
+}
+
+function snapshotsEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  try {
+    return JSON.stringify(left) === JSON.stringify(right)
+  } catch {
+    return false
+  }
+}
 
 type SheetAgent = {
   id: string
@@ -171,6 +220,18 @@ function readSnapshotRange(snapshot: unknown, range: string, requestedSheetName?
     values.push(outputRow)
   }
   return { sheetName: typeof sheet.name === 'string' ? sheet.name : 'Sheet1', values }
+}
+
+function readSnapshotSheetNames(snapshot: unknown): string[] {
+  if (snapshot === null || typeof snapshot !== 'object') throw new Error('当前会话没有可读取的工作簿')
+  const workbook = snapshot as Record<string, any>
+  if (workbook.sheets === null || typeof workbook.sheets !== 'object') throw new Error('当前工作簿没有工作表')
+  const sheetOrder = Array.isArray(workbook.sheetOrder) ? workbook.sheetOrder : Object.keys(workbook.sheets)
+  return sheetOrder
+    .map((id: unknown) => typeof id === 'string' ? workbook.sheets[id] : undefined)
+    .filter((sheet: unknown): sheet is Record<string, any> => sheet !== null && typeof sheet === 'object')
+    .map((sheet) => typeof sheet.name === 'string' ? sheet.name : '')
+    .filter((name) => name.length > 0)
 }
 
 function readDocumentText(snapshot: unknown): { title: string; text: string } {
@@ -336,23 +397,29 @@ export function apply(ctx: Context): void {
   const services = ctx as Context & { workspaceRegistry: WorkspaceRegistryLike }
   const domainPromise = ctx.storageDomain.open(workbookDomainSpec)
   const workbookUpdateLocks = new Map<string, Promise<void>>()
+  const sessionQueueLocks = new Map<string, Promise<void>>()
   const slideScreenshotRequests = new Map<string, Map<string, SlideScreenshotRequest>>()
   const slideScreenshotResults = new Map<string, SlideScreenshotResult>()
+  const sheetScreenshotRequests = new Map<string, Map<string, SheetScreenshotRequest>>()
+  const sheetScreenshotResults = new Map<string, SlideScreenshotResult>()
   const docScreenshotRequests = new Map<string, Map<string, DocScreenshotRequest>>()
   const docScreenshotResults = new Map<string, SlideScreenshotResult>()
   const univerCodeRequests = new Map<string, Map<string, UniverCodeRequest>>()
   const univerCodeResults = new Map<string, UniverCodeResult>()
-  const activeSlideSessions = new Set<string>()
+  const activeSlideSessions = new Map<string, number>()
   const apiReference = createStandardApiReference()
+  let lastOperationCreatedAt = 0
   const requireActiveSlide = (sessionId: string) => {
-    if (!activeSlideSessions.has(sessionId)) {
+    const lastSeen = activeSlideSessions.get(sessionId)
+    if (lastSeen === undefined || Date.now() - lastSeen > 2_500) {
+      activeSlideSessions.delete(sessionId)
       throw new Error('请先打开当前会话的 Univer → Slide 页面，再调用 Slide 工具')
     }
   }
 
   const updateWorkbookRow = async (
     storageKey: string,
-    update: (row: z.infer<typeof workbookRowSchema> | undefined) => z.infer<typeof workbookRowSchema>,
+    update: (row: WorkbookRow | undefined) => WorkbookRow,
   ): Promise<void> => {
     const previous = workbookUpdateLocks.get(storageKey) ?? Promise.resolve()
     const next = previous.catch(() => {}).then(async () => {
@@ -367,27 +434,193 @@ export function apply(ctx: Context): void {
     }
   }
 
-  const enqueueSubagentSheetOperation = async (
+  const withSessionQueueLock = async <T>(sessionId: string, action: () => Promise<T>): Promise<T> => {
+    const previous = sessionQueueLocks.get(sessionId) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolveLock) => { release = resolveLock })
+    const tail = previous.catch(() => {}).then(() => current)
+    sessionQueueLocks.set(sessionId, tail)
+    await previous.catch(() => {})
+    try {
+      return await action()
+    } finally {
+      release()
+      if (sessionQueueLocks.get(sessionId) === tail) sessionQueueLocks.delete(sessionId)
+    }
+  }
+
+  // Move queues written by the first unified-queue implementation from the root
+  // row to their target unit rows, and materialize legacy Sheet-only mirrors.
+  // Callers serialize this helper with withSessionQueueLock.
+  const migrateLegacyOperations = async (sessionId: string): Promise<void> => {
+    const table = (await domainPromise).table('workbooks')
+    const root = table.get(sessionId)
+    if (root === undefined) return
+    const rootOperations = root.queuedOperations ?? []
+    const rootIds = new Set(rootOperations.map((item) => item.id))
+    const legacySheet = (root.queuedSheetOperations ?? [])
+      .filter((item) => !rootIds.has(item.id))
+      .map((item) => ({
+        id: item.id,
+        unitType: 'sheet' as const,
+        operation: item.operation,
+        createdAt: root.updatedAt,
+      }))
+    const sheetOperations = [...rootOperations.filter((item) => item.unitType === 'sheet'), ...legacySheet]
+    const movedByUnit = new Map<UniverUnitType, QueuedOperation[]>([
+      ['doc', rootOperations.filter((item) => item.unitType === 'doc')],
+      ['slide', rootOperations.filter((item) => item.unitType === 'slide')],
+    ])
+
+    const mergeUnique = (existing: QueuedOperation[], incoming: QueuedOperation[]): QueuedOperation[] => {
+      const seen = new Set<string>()
+      return [...existing, ...incoming]
+        .filter((item) => !seen.has(item.id) && seen.add(item.id))
+        .sort((left, right) => left.createdAt - right.createdAt)
+    }
+
+    const normalizedSheet = mergeUnique([], sheetOperations)
+    if (
+      legacySheet.length > 0
+      || rootOperations.some((item) => item.unitType !== 'sheet')
+      || normalizedSheet.length !== rootOperations.length
+    ) {
+      await updateWorkbookRow(sessionId, (row) => ({
+        snapshot: row?.snapshot ?? null,
+        updatedAt: row?.updatedAt ?? Date.now(),
+        filePath: row?.filePath ?? null,
+        queuedOperations: normalizedSheet,
+        queuedSheetOperations: row?.queuedSheetOperations,
+        revision: row?.revision,
+      }))
+    }
+
+    for (const unitType of ['doc', 'slide'] as const) {
+      const incoming = movedByUnit.get(unitType) ?? []
+      if (incoming.length === 0) continue
+      const key = storageKeyForUnit(sessionId, unitType)
+      await updateWorkbookRow(key, (row) => ({
+        snapshot: row?.snapshot ?? null,
+        updatedAt: row?.updatedAt ?? Date.now(),
+        filePath: row?.filePath ?? null,
+        queuedOperations: mergeUnique((row?.queuedOperations ?? []).filter((item) => item.unitType === unitType), incoming),
+        queuedSheetOperations: row?.queuedSheetOperations,
+        revision: row?.revision,
+      }))
+    }
+  }
+
+  const claimOperations = async (sessionId: string, clientId: string): Promise<QueuedOperation[]> => (
+    withSessionQueueLock(sessionId, async () => {
+      await migrateLegacyOperations(sessionId)
+      const table = (await domainPromise).table('workbooks')
+      const now = Date.now()
+      const entries = UNIT_TYPES.flatMap((candidateUnit, unitOrder) => {
+        const row = table.get(storageKeyForUnit(sessionId, candidateUnit))
+        return (row?.queuedOperations ?? [])
+          .filter((item) => item.unitType === candidateUnit)
+          .map((operation, queueOrder) => ({ operation, candidateUnit, unitOrder, queueOrder }))
+      }).sort((left, right) => (
+        left.operation.createdAt - right.operation.createdAt
+        || left.unitOrder - right.unitOrder
+        || left.queueOrder - right.queueOrder
+      ))
+      const isAvailable = (operation: QueuedOperation) => (
+        operation.claimedBy === undefined
+        || operation.claimedBy === clientId
+        || operation.claimedAt === undefined
+        || now - operation.claimedAt >= OPERATION_LEASE_MS
+      )
+      if (entries.length === 0 || !isAvailable(entries[0]!.operation)) return []
+      const selectedUnit = entries[0]!.candidateUnit
+      const selectedIds: string[] = []
+      for (const entry of entries) {
+        if (entry.candidateUnit !== selectedUnit || !isAvailable(entry.operation)) break
+        selectedIds.push(entry.operation.id)
+      }
+      const selectedSet = new Set(selectedIds)
+      let result: QueuedOperation[] = []
+      await updateWorkbookRow(storageKeyForUnit(sessionId, selectedUnit), (row) => {
+        const next = (row?.queuedOperations ?? []).map((item) => selectedSet.has(item.id)
+          ? { ...item, claimedBy: clientId, claimedAt: now }
+          : item)
+        result = next.filter((item) => selectedSet.has(item.id))
+        return {
+          snapshot: row?.snapshot ?? null,
+          updatedAt: row?.updatedAt ?? now,
+          filePath: row?.filePath ?? null,
+          queuedOperations: next,
+          queuedSheetOperations: row?.queuedSheetOperations,
+          revision: row?.revision,
+        }
+      })
+      return result
+    })
+  )
+
+  const enqueueOperation = async (
+    unitType: UniverUnitType,
     args: Record<string, unknown>,
     exec: { agent?: SheetAgent; callId: unknown },
     action: string,
-  ): Promise<void> => {
-    if (!isSubagent(exec.agent)) return
+  ): Promise<string> => {
     const ownerSessionId = sheetOwnerSessionId(exec.agent)
-    if (ownerSessionId === undefined) throw new Error('无法确定父会话，不能写入表格')
-    const queued: QueuedSheetOperation = {
-      id: `${exec.agent!.id}:${String(exec.callId)}`,
+    if (ownerSessionId === undefined) throw new Error(`无法确定当前会话，不能写入 ${unitType}`)
+    const callId = exec.callId === undefined || exec.callId === null ? randomUUID() : String(exec.callId)
+    const id = `${exec.agent?.id ?? ownerSessionId}:${callId}`
+    const createdAt = Math.max(Date.now(), lastOperationCreatedAt + 1)
+    lastOperationCreatedAt = createdAt
+    const queued: QueuedOperation = {
+      id,
+      unitType,
       operation: { action, ...args },
+      createdAt,
     }
-    await updateWorkbookRow(ownerSessionId, (row) => ({
-      snapshot: row?.snapshot ?? null,
-      updatedAt: Date.now(),
-      filePath: row?.filePath ?? null,
-      queuedSheetOperations: [
-        ...(row?.queuedSheetOperations ?? []).filter((item) => item.id !== queued.id),
-        queued,
-      ].slice(-2_000),
-    }))
+    await withSessionQueueLock(ownerSessionId, async () => {
+      await migrateLegacyOperations(ownerSessionId)
+      const storageKey = storageKeyForUnit(ownerSessionId, unitType)
+      await updateWorkbookRow(storageKey, (row) => {
+        const pending = (row?.queuedOperations ?? []).filter((item) => item.unitType === unitType)
+        if (pending.some((item) => item.id === id)) return row!
+        if (pending.length >= MAX_PENDING_OPERATIONS) {
+          throw new Error(`${unitType} 操作队列已达到 ${MAX_PENDING_OPERATIONS} 条上限，请等待现有操作完成后重试`)
+        }
+        return {
+          snapshot: row?.snapshot ?? null,
+          updatedAt: Date.now(),
+          filePath: row?.filePath ?? null,
+          queuedOperations: [...pending, queued],
+          // Mirror Sheet writes for older browser clients during migration.
+          queuedSheetOperations: unitType === 'sheet'
+            ? [...(row?.queuedSheetOperations ?? []).filter((item) => item.id !== id), { id, operation: queued.operation } satisfies QueuedSheetOperation]
+            : row?.queuedSheetOperations,
+          revision: row?.revision,
+        }
+      })
+    })
+    return id
+  }
+
+  const waitForOperationQueueEmpty = async (
+    sessionId: string,
+    unitType: UniverUnitType,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    await withSessionQueueLock(sessionId, async () => migrateLegacyOperations(sessionId))
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw signal.reason ?? new Error('等待待处理操作时已取消')
+      const row = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, unitType))
+      const ids = new Set((row?.queuedOperations ?? [])
+        .filter((item) => item.unitType === unitType)
+        .map((item) => item.id))
+      if (unitType === 'sheet') {
+        for (const item of row?.queuedSheetOperations ?? []) ids.add(item.id)
+      }
+      if (ids.size === 0) return
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
+    }
+    throw new Error(`${unitType} 仍有待处理操作，无法安全读取最新已应用数据；请保持对应 Univer 页面打开并重试`)
   }
 
   let disposed = false
@@ -448,45 +681,86 @@ export function apply(ctx: Context): void {
         dataUrl?: unknown
         width?: unknown
         height?: unknown
+        scrollTop?: unknown
+        scrollHeight?: unknown
+        viewportHeight?: unknown
+        scrollLeft?: unknown
+        scrollWidth?: unknown
+        viewportWidth?: unknown
         result?: unknown
         logs?: unknown
         error?: unknown
         active?: unknown
+        activeUnit?: unknown
       }
-      if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
+      const sessionId = request.sessionId
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
         return { ok: false, error: { code: 'invalid-arguments', message: 'sessionId is required', details: {} } } as any
       }
       if (request.unitType !== undefined && request.unitType !== 'sheet' && request.unitType !== 'doc' && request.unitType !== 'slide') {
         return { ok: false, error: { code: 'invalid-arguments', message: 'unitType must be sheet, doc, or slide', details: {} } } as any
       }
+      if (request.activeUnit !== undefined && request.activeUnit !== 'sheet' && request.activeUnit !== 'doc' && request.activeUnit !== 'slide') {
+        return { ok: false, error: { code: 'invalid-arguments', message: 'activeUnit must be sheet, doc, or slide', details: {} } } as any
+      }
       if (disposed) return { ok: false, error: { code: 'internal', message: 'plugin is disposed', details: {} } } as any
       const table = (await domainPromise).table('workbooks')
-      // Keep the legacy Sheet key unchanged and store the other products under
-      // namespaced keys, so existing persisted workbooks remain available.
-      const storageKey = request.unitType === 'doc'
-        ? `${request.sessionId}:doc`
-        : request.unitType === 'slide' ? `${request.sessionId}:slide` : request.sessionId
+      const unitType = request.unitType as UniverUnitType | undefined
+      const storageKey = storageKeyForUnit(sessionId, unitType ?? 'sheet')
       if (endpoint === 'load') {
         return { ok: true, value: table.get(storageKey)?.snapshot ?? null }
       }
       if (endpoint === 'file-path') {
         return { ok: true, value: table.get(storageKey)?.filePath ?? null }
       }
+      if (endpoint === 'operations' || endpoint === 'tasks') {
+        if (typeof request.clientId !== 'string' || request.clientId.length === 0) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'clientId is required', details: {} } } as any
+        }
+        if (endpoint === 'tasks') {
+          if (request.activeUnit === 'slide') activeSlideSessions.set(sessionId, Date.now())
+          else activeSlideSessions.delete(sessionId)
+        }
+        const operations = await claimOperations(sessionId, request.clientId)
+        if (endpoint === 'operations') return { ok: true, value: operations }
+        return {
+          ok: true,
+          value: {
+            operations,
+            codeRequests: [...(univerCodeRequests.get(sessionId)?.values() ?? [])]
+              .filter((item) => item.claimedBy === undefined),
+            sheetScreenshotRequests: [...(sheetScreenshotRequests.get(sessionId)?.values() ?? [])],
+            docScreenshotRequests: [...(docScreenshotRequests.get(sessionId)?.values() ?? [])],
+            slideScreenshotRequests: [...(slideScreenshotRequests.get(sessionId)?.values() ?? [])],
+          },
+        }
+      }
       if (endpoint === 'sheet-operations') {
-        return { ok: true, value: table.get(request.sessionId)?.queuedSheetOperations ?? [] }
+        const row = table.get(storageKeyForUnit(sessionId, 'sheet'))
+        const legacy = row?.queuedSheetOperations ?? []
+        const legacyIds = new Set(legacy.map((item) => item.id))
+        return {
+          ok: true,
+          value: [
+            ...legacy,
+            ...(row?.queuedOperations ?? [])
+              .filter((item) => item.unitType === 'sheet' && !legacyIds.has(item.id))
+              .map(({ id, operation }) => ({ id, operation })),
+          ],
+        }
       }
       if (endpoint === 'univer-code-target') {
-        return { ok: true, value: [...(univerCodeRequests.get(request.sessionId)?.values() ?? [])].map(({ id, unitType }) => ({ id, unitType })) }
+        return { ok: true, value: [...(univerCodeRequests.get(sessionId)?.values() ?? [])].map(({ id, unitType }) => ({ id, unitType })) }
       }
       if (endpoint === 'univer-code-requests') {
-        const requests = [...(univerCodeRequests.get(request.sessionId)?.values() ?? [])].filter((item) => item.claimedBy === undefined)
+        const requests = [...(univerCodeRequests.get(sessionId)?.values() ?? [])].filter((item) => item.claimedBy === undefined)
         return { ok: true, value: request.unitType === undefined ? requests : requests.filter((item) => item.unitType === request.unitType) }
       }
       if (endpoint === 'univer-code-claim') {
         if (typeof request.codeRequestId !== 'string' || typeof request.clientId !== 'string') {
           return { ok: false, error: { code: 'invalid-arguments', message: 'codeRequestId and clientId are required', details: {} } } as any
         }
-        const pending = univerCodeRequests.get(request.sessionId)
+        const pending = univerCodeRequests.get(sessionId)
         const codeRequest = pending?.get(request.codeRequestId)
         if (codeRequest === undefined || codeRequest.claimedBy !== undefined) return { ok: true, value: null }
         codeRequest.claimedBy = request.clientId
@@ -496,7 +770,7 @@ export function apply(ctx: Context): void {
         if (typeof request.codeRequestId !== 'string' || typeof request.clientId !== 'string') {
           return { ok: false, error: { code: 'invalid-arguments', message: 'codeRequestId and clientId are required', details: {} } } as any
         }
-        const pending = univerCodeRequests.get(request.sessionId)
+        const pending = univerCodeRequests.get(sessionId)
         const codeRequest = pending?.get(request.codeRequestId)
         if (pending === undefined || codeRequest === undefined) {
           return { ok: false, error: { code: 'not-found', message: 'code request is no longer pending', details: {} } } as any
@@ -512,22 +786,52 @@ export function apply(ctx: Context): void {
           : { result: typeof request.result === 'string' ? request.result : 'undefined', logs }
         univerCodeResults.set(request.codeRequestId, result)
         pending.delete(request.codeRequestId)
-        if (pending.size === 0) univerCodeRequests.delete(request.sessionId)
+        if (pending.size === 0) univerCodeRequests.delete(sessionId)
         return { ok: true, value: { accepted: true } }
       }
       if (endpoint === 'slide-runtime-heartbeat') {
-        if (request.active === true) activeSlideSessions.add(request.sessionId)
-        else activeSlideSessions.delete(request.sessionId)
-        return { ok: true, value: { active: activeSlideSessions.has(request.sessionId) } }
+        if (request.active === true) activeSlideSessions.set(sessionId, Date.now())
+        else activeSlideSessions.delete(sessionId)
+        const lastSeen = activeSlideSessions.get(sessionId)
+        return { ok: true, value: { active: lastSeen !== undefined && Date.now() - lastSeen <= 2_500 } }
+      }
+      if (endpoint === 'sheet-screenshot-result') {
+        if (typeof request.screenshotId !== 'string') {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'screenshotId is required', details: {} } } as any
+        }
+        const pending = sheetScreenshotRequests.get(sessionId)
+        if (!pending?.has(request.screenshotId)) {
+          return { ok: false, error: { code: 'not-found', message: 'sheet screenshot request is no longer pending', details: {} } } as any
+        }
+        const result: SlideScreenshotResult = typeof request.error === 'string'
+          ? { error: request.error }
+          : {
+              dataUrl: typeof request.dataUrl === 'string' ? request.dataUrl : undefined,
+              width: typeof request.width === 'number' ? request.width : undefined,
+              height: typeof request.height === 'number' ? request.height : undefined,
+              scrollTop: typeof request.scrollTop === 'number' ? request.scrollTop : undefined,
+              scrollHeight: typeof request.scrollHeight === 'number' ? request.scrollHeight : undefined,
+              viewportHeight: typeof request.viewportHeight === 'number' ? request.viewportHeight : undefined,
+              scrollLeft: typeof request.scrollLeft === 'number' ? request.scrollLeft : undefined,
+              scrollWidth: typeof request.scrollWidth === 'number' ? request.scrollWidth : undefined,
+              viewportWidth: typeof request.viewportWidth === 'number' ? request.viewportWidth : undefined,
+            }
+        if (result.error === undefined && (result.dataUrl === undefined || result.width === undefined || result.height === undefined)) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'dataUrl, width, and height are required', details: {} } } as any
+        }
+        sheetScreenshotResults.set(request.screenshotId, result)
+        pending.delete(request.screenshotId)
+        if (pending.size === 0) sheetScreenshotRequests.delete(sessionId)
+        return { ok: true, value: { accepted: true } }
       }
       if (endpoint === 'doc-screenshot-requests') {
-        return { ok: true, value: [...(docScreenshotRequests.get(request.sessionId)?.values() ?? [])] }
+        return { ok: true, value: [...(docScreenshotRequests.get(sessionId)?.values() ?? [])] }
       }
       if (endpoint === 'doc-screenshot-result') {
         if (typeof request.screenshotId !== 'string') {
           return { ok: false, error: { code: 'invalid-arguments', message: 'screenshotId is required', details: {} } } as any
         }
-        const pending = docScreenshotRequests.get(request.sessionId)
+        const pending = docScreenshotRequests.get(sessionId)
         if (!pending?.has(request.screenshotId)) {
           return { ok: false, error: { code: 'not-found', message: 'document screenshot request is no longer pending', details: {} } } as any
         }
@@ -537,23 +841,26 @@ export function apply(ctx: Context): void {
               dataUrl: typeof request.dataUrl === 'string' ? request.dataUrl : undefined,
               width: typeof request.width === 'number' ? request.width : undefined,
               height: typeof request.height === 'number' ? request.height : undefined,
+              scrollTop: typeof request.scrollTop === 'number' ? request.scrollTop : undefined,
+              scrollHeight: typeof request.scrollHeight === 'number' ? request.scrollHeight : undefined,
+              viewportHeight: typeof request.viewportHeight === 'number' ? request.viewportHeight : undefined,
             }
         if (result.error === undefined && (result.dataUrl === undefined || result.width === undefined || result.height === undefined)) {
           return { ok: false, error: { code: 'invalid-arguments', message: 'dataUrl, width, and height are required', details: {} } } as any
         }
         docScreenshotResults.set(request.screenshotId, result)
         pending.delete(request.screenshotId)
-        if (pending.size === 0) docScreenshotRequests.delete(request.sessionId)
+        if (pending.size === 0) docScreenshotRequests.delete(sessionId)
         return { ok: true, value: { accepted: true } }
       }
       if (endpoint === 'slide-screenshot-requests') {
-        return { ok: true, value: [...(slideScreenshotRequests.get(request.sessionId)?.values() ?? [])] }
+        return { ok: true, value: [...(slideScreenshotRequests.get(sessionId)?.values() ?? [])] }
       }
       if (endpoint === 'slide-screenshot-result') {
         if (typeof request.screenshotId !== 'string') {
           return { ok: false, error: { code: 'invalid-arguments', message: 'screenshotId is required', details: {} } } as any
         }
-        const pending = slideScreenshotRequests.get(request.sessionId)
+        const pending = slideScreenshotRequests.get(sessionId)
         if (!pending?.has(request.screenshotId)) {
           return { ok: false, error: { code: 'not-found', message: 'screenshot request is no longer pending', details: {} } } as any
         }
@@ -569,54 +876,129 @@ export function apply(ctx: Context): void {
         }
         slideScreenshotResults.set(request.screenshotId, result)
         pending.delete(request.screenshotId)
-        if (pending.size === 0) slideScreenshotRequests.delete(request.sessionId)
+        if (pending.size === 0) slideScreenshotRequests.delete(sessionId)
         return { ok: true, value: { accepted: true } }
       }
-      if (endpoint === 'ack-sheet-operations') {
+      if (endpoint === 'commit-operations') {
+        if (unitType === undefined) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'unitType is required', details: {} } } as any
+        }
+        if (request.snapshot === undefined) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'snapshot is required', details: {} } } as any
+        }
+        if (
+          !Array.isArray(request.operationIds)
+          || request.operationIds.length === 0
+          || !request.operationIds.every((id) => typeof id === 'string')
+        ) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'operationIds must be a non-empty string array', details: {} } } as any
+        }
+        if (typeof request.clientId !== 'string' || request.clientId.length === 0) {
+          return { ok: false, error: { code: 'invalid-arguments', message: 'clientId is required', details: {} } } as any
+        }
+        const operationIds = [...new Set(request.operationIds as string[])]
+        let revision = 0
+        await withSessionQueueLock(sessionId, async () => {
+          await migrateLegacyOperations(sessionId)
+          const targetKey = storageKeyForUnit(sessionId, unitType)
+          await updateWorkbookRow(targetKey, (row) => {
+            const pending = row?.queuedOperations ?? []
+            const committedOperations: QueuedOperation[] = []
+            for (const operationId of operationIds) {
+              const operation = pending.find((item) => item.id === operationId && item.unitType === unitType)
+              if (operation === undefined) throw new Error(`待提交操作不存在或不属于 ${unitType}：${operationId}`)
+              if (operation.claimedBy !== request.clientId) throw new Error(`操作未由当前客户端认领：${operationId}`)
+              committedOperations.push(operation)
+            }
+            const committed = new Set(operationIds)
+            const clearsFilePath = committedOperations.some((item) => {
+              const action = item.operation.action
+              return action === 'new' || action === 'new-doc' || action === 'new-slide'
+            })
+            revision = (row?.revision ?? 0) + 1
+            return {
+              snapshot: request.snapshot,
+              updatedAt: Date.now(),
+              filePath: clearsFilePath ? null : row?.filePath ?? null,
+              queuedOperations: pending.filter((item) => !committed.has(item.id)),
+              queuedSheetOperations: unitType === 'sheet'
+                ? (row?.queuedSheetOperations ?? []).filter((item) => !committed.has(item.id))
+                : row?.queuedSheetOperations,
+              revision,
+            }
+          })
+        })
+        return { ok: true, value: { committed: operationIds.length, revision } }
+      }
+      if (endpoint === 'ack-operations' || endpoint === 'ack-sheet-operations') {
         if (!Array.isArray(request.operationIds) || !request.operationIds.every((id) => typeof id === 'string')) {
           return { ok: false, error: { code: 'invalid-arguments', message: 'operationIds must be a string array', details: {} } } as any
         }
         const acknowledged = new Set(request.operationIds as string[])
-        await updateWorkbookRow(request.sessionId, (row) => ({
-          snapshot: row?.snapshot ?? null,
-          updatedAt: Date.now(),
-          filePath: row?.filePath ?? null,
-          queuedSheetOperations: (row?.queuedSheetOperations ?? []).filter((item) => !acknowledged.has(item.id)),
-        }))
+        const targetUnits: UniverUnitType[] = endpoint === 'ack-sheet-operations'
+          ? ['sheet']
+          : unitType === undefined ? UNIT_TYPES : [unitType]
+        await withSessionQueueLock(sessionId, async () => {
+          await migrateLegacyOperations(sessionId)
+          for (const targetUnit of targetUnits) {
+            await updateWorkbookRow(storageKeyForUnit(sessionId, targetUnit), (row) => ({
+              snapshot: row?.snapshot ?? null,
+              updatedAt: Date.now(),
+              filePath: row?.filePath ?? null,
+              queuedOperations: (row?.queuedOperations ?? []).filter((item) => !acknowledged.has(item.id)),
+              queuedSheetOperations: targetUnit === 'sheet'
+                ? (row?.queuedSheetOperations ?? []).filter((item) => !acknowledged.has(item.id))
+                : row?.queuedSheetOperations,
+              revision: row?.revision,
+            }))
+          }
+        })
         return { ok: true, value: { acknowledged: acknowledged.size } }
       }
       if (endpoint === 'save' && request.snapshot !== undefined) {
         let nextFilePath: string | null | undefined
+        let revision = 0
         await updateWorkbookRow(storageKey, (previous) => {
           nextFilePath = request.filePath === null
             ? null
             : typeof request.filePath === 'string' ? request.filePath : previous?.filePath
+          const changed = !snapshotsEqual(previous?.snapshot, request.snapshot)
+          revision = (previous?.revision ?? 0) + (changed ? 1 : 0)
           return {
             snapshot: request.snapshot,
             updatedAt: Date.now(),
             filePath: nextFilePath,
+            queuedOperations: previous?.queuedOperations,
             queuedSheetOperations: previous?.queuedSheetOperations,
+            revision,
           }
         })
-        return { ok: true, value: { saved: true, filePath: nextFilePath ?? null } }
+        return { ok: true, value: { saved: true, filePath: nextFilePath ?? null, revision } }
       }
       if (endpoint === 'export' && request.snapshot !== undefined) {
-        if (request.unitType !== 'sheet' && request.unitType !== 'doc' && request.unitType !== 'slide') {
+        if (unitType === undefined) {
           return { ok: false, error: { code: 'invalid-arguments', message: 'unitType is required for export', details: {} } } as any
         }
         if (typeof request.filePath !== 'string') {
           return { ok: false, error: { code: 'invalid-arguments', message: 'filePath is required for export', details: {} } } as any
         }
-        const root = services.workspaceRegistry.host.sessionPath(request.sessionId)
+        const root = services.workspaceRegistry.host.sessionPath(sessionId)
         if (typeof root !== 'string' || root.length === 0) throw new Error('无法解析当前 session workspace 目录')
-        const saved = await saveExportedFile(root, request.filePath, request.unitType, request.snapshot, request.overwrite === true)
-        await updateWorkbookRow(storageKey, (previous) => ({
-          snapshot: request.snapshot,
-          updatedAt: Date.now(),
-          filePath: saved.path,
-          queuedSheetOperations: previous?.queuedSheetOperations,
-        }))
-        return { ok: true, value: saved }
+        const saved = await saveExportedFile(root, request.filePath, unitType, request.snapshot, request.overwrite === true)
+        let revision = 0
+        await updateWorkbookRow(storageKey, (previous) => {
+          const changed = !snapshotsEqual(previous?.snapshot, request.snapshot)
+          revision = (previous?.revision ?? 0) + (changed ? 1 : 0)
+          return {
+            snapshot: request.snapshot,
+            updatedAt: Date.now(),
+            filePath: saved.path,
+            queuedOperations: previous?.queuedOperations,
+            queuedSheetOperations: previous?.queuedSheetOperations,
+            revision,
+          }
+        })
+        return { ok: true, value: { ...saved, revision } }
       }
       return { ok: false, error: { code: 'not-found', message: `unknown endpoint: ${endpoint}`, details: {} } } as any
     }
@@ -721,6 +1103,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['applied'], required: true },
           unitType: { type: 'string', required: true },
           result: { type: 'string', required: true },
           logs: { type: 'array', items: { type: 'string' }, required: true },
@@ -768,6 +1151,7 @@ export function apply(ctx: Context): void {
       return {
         ok: true,
         action: 'execute-code',
+        status: 'applied' as const,
         unitType: args.unitType,
         result: result.result ?? 'undefined',
         logs: result.logs ?? [],
@@ -786,54 +1170,14 @@ export function apply(ctx: Context): void {
     },
     output,
     async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'new')
+      const operationId = await enqueueOperation('sheet', args, exec, 'new')
       return {
         ok: true,
         action: 'new',
+        status: 'queued' as const,
+        operationId,
         message: `已创建 Univer 表格“${args.title ?? '对话表格'}”，工作表为“${args.sheetName ?? 'Sheet1'}”。`,
       }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_sheet_add',
-    description: 'Add a worksheet to the current Univer workbook. The new worksheet appears as a tab in the current Sheet view.',
-    parameters: {
-      name: { type: 'string', required: true, description: 'New worksheet name.' },
-      rows: { type: 'integer', description: 'Initial row count. Defaults to 100.' },
-      columns: { type: 'integer', description: 'Initial column count. Defaults to 26.' },
-    },
-    output,
-    async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'add-sheet')
-      return { ok: true, action: 'add-sheet', message: `已添加工作表“${args.name}”。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_sheet_delete',
-    description: 'Delete a worksheet from the current Univer workbook by name.',
-    parameters: {
-      name: { type: 'string', required: true, description: 'Worksheet name to delete.' },
-    },
-    output,
-    async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'delete-sheet')
-      return { ok: true, action: 'delete-sheet', message: `已删除工作表“${args.name}”。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_sheet_rename',
-    description: 'Rename a worksheet in the current Univer workbook.',
-    parameters: {
-      oldName: { type: 'string', required: true, description: 'Current worksheet name.' },
-      newName: { type: 'string', required: true, description: 'New worksheet name.' },
-    },
-    output,
-    async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'rename-sheet')
-      return { ok: true, action: 'rename-sheet', message: `已将工作表“${args.oldName}”重命名为“${args.newName}”。` }
     },
   }))
 
@@ -847,6 +1191,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['applied'], required: true },
           message: { type: 'string', required: true },
           sheets: { type: 'array', items: { type: 'string' }, required: true },
         },
@@ -856,12 +1201,18 @@ export function apply(ctx: Context): void {
         { type: 'text' as const, text: value.message },
       ],
     },
-    async execute() {
+    async execute(_args, exec) {
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能列出工作表')
+      await waitForOperationQueueEmpty(sessionId, 'sheet', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'sheet'))
+      const sheets = readSnapshotSheetNames(stored?.snapshot)
       return {
         ok: true,
         action: 'list-sheets',
-        sheets: [],
-        message: 'Sheet 列表由当前会话中的 Sheet 页面维护；请打开 Sheet 页签查看当前工作表标签。',
+        status: 'applied' as const,
+        sheets,
+        message: `当前工作簿包含 ${sheets.length} 个工作表：${sheets.join('、')}`,
       }
     },
   }))
@@ -879,6 +1230,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['applied'], required: true },
           message: { type: 'string', required: true },
           sheetName: { type: 'string', required: true },
           range: { type: 'string', required: true },
@@ -907,11 +1259,13 @@ export function apply(ctx: Context): void {
     async execute(args, exec) {
       const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能读取表格')
-      const stored = (await domainPromise).table('workbooks').get(sessionId)
+      await waitForOperationQueueEmpty(sessionId, 'sheet', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'sheet'))
       const result = readSnapshotRange(stored?.snapshot, args.range, args.sheetName)
       return {
         ok: true,
         action: 'get-range',
+        status: 'applied' as const,
         message: `已读取 ${result.sheetName}!${args.range}。`,
         sheetName: result.sheetName,
         range: args.range,
@@ -921,64 +1275,106 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'univer_sheet_set_range',
-    description: 'Write a rectangular 2D array into an A1 range in the conversation Univer Sheet. Values may be strings, numbers, booleans, null, or formulas beginning with =.',
+    name: 'univer_sheet_screenshot',
+    description: 'Capture the currently rendered Univer worksheet viewport as a PNG. The AI can scroll the worksheet between captures to inspect large tables progressively.',
     parameters: {
-      range: { type: 'string', required: true, description: 'A1 range, for example A1:D4.' },
-      values: {
-        type: 'array',
-        required: true,
-        description: 'Rectangular two-dimensional values array.',
-        items: {
-          type: 'array',
-          items: {
-            oneOf: [
-              { type: 'string' },
-              { type: 'number' },
-              { type: 'boolean' },
-              { type: 'null' },
-            ],
-          },
+      mode: { type: 'string', enum: ['sheet', 'editor'], description: 'sheet returns the rendered worksheet canvas; editor is reserved for diagnostics. Defaults to sheet.' },
+      scroll: { type: 'string', enum: ['none', 'up', 'down', 'left', 'right', 'top', 'bottom', 'start', 'end'], description: 'Scroll the worksheet before capturing. top/bottom affect rows; start/end affect columns.' },
+      amount: { type: 'number', description: 'Scroll distance in CSS pixels. Defaults to 80% of the relevant viewport dimension.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['rendered'], required: true },
+          message: { type: 'string', required: true },
+          scrollTop: { type: 'number', required: true },
+          scrollLeft: { type: 'number', required: true },
+          atTop: { type: 'boolean', required: true },
+          atBottom: { type: 'boolean', required: true },
+          atStart: { type: 'boolean', required: true },
+          atEnd: { type: 'boolean', required: true },
+          image: imageValueSchema,
         },
-      },
-      sheetName: { type: 'string', description: 'Target worksheet name. Defaults to the active sheet.' },
+      } as const,
+      render: (_args: unknown, value: { message: string; image: ScreenshotImageValue }) => [{ type: 'text' as const, text: value.message }, {
+        type: 'image' as const,
+        attachment: {
+          attachmentId: value.image.attachmentId,
+          mediaType: value.image.mediaType,
+          bytes: value.image.bytes,
+          width: value.image.width,
+          height: value.image.height,
+          ...(value.image.name === undefined ? {} : { name: value.image.name }),
+        } as any,
+      }],
     },
-    output,
     async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'set-range')
-      return { ok: true, action: 'set-range', message: `已写入 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range}。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_sheet_clear_range',
-    description: 'Clear cell contents in an A1 range in the conversation Univer Sheet.',
-    parameters: {
-      range: { type: 'string', required: true, description: 'A1 range to clear.' },
-      sheetName: { type: 'string', description: 'Target worksheet name. Defaults to the active sheet.' },
-    },
-    output,
-    async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'clear-range')
-      return { ok: true, action: 'clear-range', message: `已清空 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range}。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_sheet_format_range',
-    description: 'Format an A1 range in the conversation Univer Sheet. Use CSS hex colors such as #2563eb.',
-    parameters: {
-      range: { type: 'string', required: true, description: 'A1 range to format.' },
-      sheetName: { type: 'string', description: 'Target worksheet name. Defaults to the active sheet.' },
-      background: { type: 'string', description: 'Cell background hex color.' },
-      fontColor: { type: 'string', description: 'Font hex color.' },
-      bold: { type: 'boolean', description: 'Whether text is bold.' },
-      fontSize: { type: 'number', description: 'Font size in points.' },
-    },
-    output,
-    async execute(args, exec) {
-      await enqueueSubagentSheetOperation(args, exec, 'format-range')
-      return { ok: true, action: 'format-range', message: `已设置 ${args.sheetName ? `${args.sheetName}!` : ''}${args.range} 的格式。` }
+      const sessionId = sheetOwnerSessionId(exec.agent)
+      if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取工作表')
+      await waitForOperationQueueEmpty(sessionId, 'sheet', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'sheet'))
+      if (stored?.snapshot === null || stored?.snapshot === undefined) throw new Error('当前没有已创建或已打开的工作簿')
+      const request: SheetScreenshotRequest = {
+        id: randomUUID(),
+        mode: args.mode ?? 'sheet',
+        scroll: args.scroll ?? 'none',
+        ...(args.amount === undefined ? {} : { amount: args.amount }),
+        createdAt: Date.now(),
+      }
+      const pending = sheetScreenshotRequests.get(sessionId) ?? new Map<string, SheetScreenshotRequest>()
+      pending.set(request.id, request)
+      sheetScreenshotRequests.set(sessionId, pending)
+      const deadline = Date.now() + 15_000
+      let result: SlideScreenshotResult | undefined
+      try {
+        while (Date.now() < deadline) {
+          if (exec.signal.aborted) throw exec.signal.reason
+          result = sheetScreenshotResults.get(request.id)
+          if (result !== undefined) break
+          await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100))
+        }
+      } finally {
+        sheetScreenshotRequests.get(sessionId)?.delete(request.id)
+        if (sheetScreenshotRequests.get(sessionId)?.size === 0) sheetScreenshotRequests.delete(sessionId)
+        sheetScreenshotResults.delete(request.id)
+      }
+      if (result === undefined) throw new Error('工作表截图超时。请打开当前会话的 Univer → Sheet 页签后重试。')
+      if (result.error !== undefined) throw new Error(`浏览器工作表截图失败：${result.error}`)
+      const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(result.dataUrl ?? '')
+      if (match === null) throw new Error('浏览器返回的工作表截图不是有效 PNG data URL')
+      const data = Buffer.from(match[1]!, 'base64')
+      if (data.byteLength === 0 || data.byteLength > 20 * 1024 * 1024) throw new Error('工作表截图大小无效或超过 20 MiB')
+      const attachments = (ctx as Context & { attachments?: { saveImage: (input: { data: Uint8Array; mediaType: 'image/png'; name?: string }) => Promise<any> } }).attachments
+      if (attachments === undefined) throw new Error('当前 DSH 未挂载附件服务，无法把工作表截图返回给模型')
+      const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: 'worksheet-viewport.png' })
+      const image: ScreenshotImageValue = { attachmentId: String(ref.attachmentId), mediaType: 'image/png', bytes: ref.bytes, width: ref.width, height: ref.height, ...(ref.name === undefined ? {} : { name: ref.name }) }
+      const scrollTop = result.scrollTop ?? 0
+      const scrollHeight = result.scrollHeight ?? image.height
+      const viewportHeight = result.viewportHeight ?? image.height
+      const scrollLeft = result.scrollLeft ?? 0
+      const scrollWidth = result.scrollWidth ?? image.width
+      const viewportWidth = result.viewportWidth ?? image.width
+      const atTop = scrollTop <= 1
+      const atBottom = scrollTop + viewportHeight >= scrollHeight - 1
+      const atStart = scrollLeft <= 1
+      const atEnd = scrollLeft + viewportWidth >= scrollWidth - 1
+      return {
+        ok: true,
+        action: 'sheet-screenshot',
+        status: 'rendered' as const,
+        message: `当前工作表可视区域截图（${image.width}×${image.height}），纵向 ${Math.round(scrollTop)}/${Math.max(0, Math.round(scrollHeight - viewportHeight))}，横向 ${Math.round(scrollLeft)}/${Math.max(0, Math.round(scrollWidth - viewportWidth))}。`,
+        scrollTop,
+        scrollLeft,
+        atTop,
+        atBottom,
+        atStart,
+        atEnd,
+        image,
+      }
     },
   }))
 
@@ -990,8 +1386,9 @@ export function apply(ctx: Context): void {
       text: { type: 'string', description: 'Optional initial plain text.' },
     },
     output,
-    async execute(args) {
-      return { ok: true, action: 'new-doc', message: `已创建 Univer 文档“${args.title ?? '对话文档'}”。` }
+    async execute(args, exec) {
+      const operationId = await enqueueOperation('doc', args, exec, 'new-doc')
+      return { ok: true, action: 'new-doc', status: 'queued' as const, operationId, message: `已创建 Univer 文档“${args.title ?? '对话文档'}”。` }
     },
   }))
 
@@ -1005,6 +1402,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['applied'], required: true },
           message: { type: 'string', required: true },
           title: { type: 'string', required: true },
           text: { type: 'string', required: true },
@@ -1016,13 +1414,15 @@ export function apply(ctx: Context): void {
       ],
     },
     async execute(_args, exec) {
-      const sessionId = exec.agent?.id
+      const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能读取文档')
-      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:doc`)
+      await waitForOperationQueueEmpty(sessionId, 'doc', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'doc'))
       const result = readDocumentText(stored?.snapshot)
       return {
         ok: true,
         action: 'get-doc-text',
+        status: 'applied' as const,
         message: `已读取文档“${result.title}”。`,
         title: result.title,
         text: result.text,
@@ -1031,77 +1431,12 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'univer_doc_set_text',
-    description: 'Replace all plain text in the current conversation Univer Doc.',
-    parameters: {
-      text: { type: 'string', required: true, description: 'Replacement plain text.' },
-    },
-    output,
-    async execute() {
-      return { ok: true, action: 'set-doc-text', message: '已替换 Univer 文档正文。' }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_doc_insert_text',
-    description: 'Insert plain text at a zero-based character offset in the current conversation Univer Doc.',
-    parameters: {
-      index: { type: 'integer', required: true, description: 'Zero-based insertion offset in the document body.' },
-      text: { type: 'string', required: true, description: 'Plain text to insert.' },
-    },
-    output,
-    async execute(args) {
-      return { ok: true, action: 'insert-doc-text', message: `已在文档位置 ${args.index} 插入文本。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_doc_append_text',
-    description: 'Append plain text to the current conversation Univer Doc.',
-    parameters: {
-      text: { type: 'string', required: true, description: 'Plain text to append.' },
-    },
-    output,
-    async execute() {
-      return { ok: true, action: 'append-doc-text', message: '已追加 Univer 文档正文。' }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_doc_delete_range',
-    description: 'Delete a zero-based, end-exclusive text range from the current conversation Univer Doc.',
-    parameters: {
-      start: { type: 'integer', required: true, description: 'Inclusive zero-based start offset.' },
-      end: { type: 'integer', required: true, description: 'Exclusive zero-based end offset.' },
-    },
-    output,
-    async execute(args) {
-      return { ok: true, action: 'delete-doc-range', message: `已删除文档文本范围 [${args.start}, ${args.end})。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_doc_format_text',
-    description: 'Format a zero-based, end-exclusive text range in the current conversation Univer Doc. Use CSS hex colors such as #2563eb.',
-    parameters: {
-      start: { type: 'integer', required: true, description: 'Inclusive zero-based start offset.' },
-      end: { type: 'integer', required: true, description: 'Exclusive zero-based end offset.' },
-      bold: { type: 'boolean', description: 'Whether text is bold.' },
-      italic: { type: 'boolean', description: 'Whether text is italic.' },
-      fontSize: { type: 'number', description: 'Font size in points.' },
-      fontColor: { type: 'string', description: 'Text color hex value.' },
-    },
-    output,
-    async execute(args) {
-      return { ok: true, action: 'format-doc-text', message: `已设置文档文本范围 [${args.start}, ${args.end}) 的格式。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
     name: 'univer_doc_screenshot',
     description: 'Capture the currently rendered Univer document viewport as a PNG and return it to the model for visual inspection. Use after editing to check hierarchy, spacing, clipping, and page layout. The Univer Doc tab must be initialized in the browser.',
     parameters: {
       mode: { type: 'string', enum: ['document', 'editor'], description: 'document returns the rendered document canvas; editor is reserved for editor diagnostics. Defaults to document.' },
+      scroll: { type: 'string', enum: ['none', 'up', 'down', 'top', 'bottom'], description: 'Scroll the document before capturing. Defaults to none. Use repeated down screenshots to inspect the document progressively.' },
+      amount: { type: 'number', description: 'Scroll distance in CSS pixels for up/down. Defaults to 80% of the viewport height.' },
     },
     output: {
       schema: {
@@ -1110,7 +1445,13 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['rendered'], required: true },
           message: { type: 'string', required: true },
+          scrollTop: { type: 'number', required: true },
+          scrollHeight: { type: 'number', required: true },
+          viewportHeight: { type: 'number', required: true },
+          atTop: { type: 'boolean', required: true },
+          atBottom: { type: 'boolean', required: true },
           image: imageValueSchema,
         },
       } as const,
@@ -1132,11 +1473,18 @@ export function apply(ctx: Context): void {
     async execute(args, exec) {
       const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取文档')
-      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:doc`)
+      await waitForOperationQueueEmpty(sessionId, 'doc', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'doc'))
       if (stored?.snapshot === null || stored?.snapshot === undefined) {
         throw new Error('当前没有已创建或已打开的文档；请先在 Univer → Doc 中点击“新建”或“打开”')
       }
-      const request: DocScreenshotRequest = { id: randomUUID(), mode: args.mode ?? 'document', createdAt: Date.now() }
+      const request: DocScreenshotRequest = {
+        id: randomUUID(),
+        mode: args.mode ?? 'document',
+        scroll: args.scroll ?? 'none',
+        ...(args.amount === undefined ? {} : { amount: args.amount }),
+        createdAt: Date.now(),
+      }
       const pending = docScreenshotRequests.get(sessionId) ?? new Map<string, DocScreenshotRequest>()
       pending.set(request.id, request)
       docScreenshotRequests.set(sessionId, pending)
@@ -1172,10 +1520,21 @@ export function apply(ctx: Context): void {
         height: ref.height,
         ...(ref.name === undefined ? {} : { name: ref.name }),
       }
+      const scrollTop = result.scrollTop ?? 0
+      const scrollHeight = result.scrollHeight ?? image.height
+      const viewportHeight = result.viewportHeight ?? image.height
+      const atTop = scrollTop <= 1
+      const atBottom = scrollTop + viewportHeight >= scrollHeight - 1
       return {
         ok: true,
         action: 'doc-screenshot',
-        message: `当前文档可视区域截图（${image.width}×${image.height}）。请检查标题层级、间距、裁切、对齐和页面留白。`,
+        status: 'rendered' as const,
+        message: `当前文档可视区域截图（${image.width}×${image.height}），滚动位置 ${Math.round(scrollTop)}/${Math.max(0, Math.round(scrollHeight - viewportHeight))}${atBottom ? '，已到文档底部' : '，可继续向下滚动截图'}。请检查标题层级、间距、裁切、对齐和页面留白。`,
+        scrollTop,
+        scrollHeight,
+        viewportHeight,
+        atTop,
+        atBottom,
         image,
       }
     },
@@ -1191,10 +1550,8 @@ export function apply(ctx: Context): void {
     },
     output,
     async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能创建演示文稿')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'new-slide', message: `已创建 Univer 演示文稿“${args.title ?? '对话演示文稿'}”。` }
+      const operationId = await enqueueOperation('slide', args, exec, 'new-slide')
+      return { ok: true, action: 'new-slide', status: 'queued' as const, operationId, message: `已创建 Univer 演示文稿“${args.title ?? '对话演示文稿'}”。` }
     },
   }))
 
@@ -1208,6 +1565,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['applied'], required: true },
           message: { type: 'string', required: true },
           title: { type: 'string', required: true },
           slides: {
@@ -1257,12 +1615,13 @@ export function apply(ctx: Context): void {
     async execute(_args, exec) {
       const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能读取演示文稿')
-      requireActiveSlide(sessionId)
-      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:slide`)
+      await waitForOperationQueueEmpty(sessionId, 'slide', exec.signal)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'slide'))
       const result = readPresentation(stored?.snapshot)
       return {
         ok: true,
         action: 'list-slides',
+        status: 'applied' as const,
         message: `已读取演示文稿“${result.title}”的 ${result.slides.length} 张幻灯片。`,
         title: result.title,
         slides: result.slides,
@@ -1284,6 +1643,7 @@ export function apply(ctx: Context): void {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          status: { type: 'string', enum: ['rendered'], required: true },
           message: { type: 'string', required: true },
           slideIndex: { type: 'integer', required: true },
           image: imageValueSchema,
@@ -1308,9 +1668,10 @@ export function apply(ctx: Context): void {
       const sessionId = sheetOwnerSessionId(exec.agent)
       if (sessionId === undefined) throw new Error('无法确定当前会话，不能截取幻灯片')
       requireActiveSlide(sessionId)
+      await waitForOperationQueueEmpty(sessionId, 'slide', exec.signal)
       const slideIndex = args.slideIndex ?? 0
       if (!Number.isInteger(slideIndex) || slideIndex < 0) throw new Error('slideIndex 必须是非负整数')
-      const stored = (await domainPromise).table('workbooks').get(`${sessionId}:slide`)
+      const stored = (await domainPromise).table('workbooks').get(storageKeyForUnit(sessionId, 'slide'))
       if (stored?.snapshot === null || stored?.snapshot === undefined) {
         throw new Error('当前没有已创建或已打开的演示文稿；请先在 Univer → Slide 中点击“新建”或“打开”')
       }
@@ -1354,6 +1715,7 @@ export function apply(ctx: Context): void {
       return {
         ok: true,
         action: 'slide-screenshot',
+        status: 'rendered' as const,
         message: `第 ${slideIndex + 1} 张幻灯片截图（${image.width}×${image.height}）。请直接检查文字重叠、裁切、层级、对齐、对比度和留白。`,
         slideIndex,
         image,
@@ -1361,122 +1723,4 @@ export function apply(ctx: Context): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_add',
-    description: 'Add a blank slide to the current Univer presentation.',
-    parameters: {
-      title: { type: 'string', description: 'Optional slide title.' },
-      index: { type: 'integer', description: 'Zero-based insertion index. Defaults to the end.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加幻灯片')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'add-slide', message: `已添加${args.title ? `“${args.title}”` : '一张'}幻灯片。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_delete',
-    description: 'Delete a slide by its zero-based index from the current Univer presentation.',
-    parameters: {
-      index: { type: 'integer', required: true, description: 'Zero-based slide index.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能删除幻灯片')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'delete-slide', message: `已删除第 ${args.index + 1} 张幻灯片。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_add_text',
-    description: 'Add a text element to a slide in the current Univer presentation. Coordinates and sizes use slide canvas units.',
-    parameters: {
-      slideIndex: { type: 'integer', required: true, description: 'Zero-based slide index.' },
-      text: { type: 'string', required: true, description: 'Text content.' },
-      left: { type: 'number', description: 'Left position. Defaults to 120.' },
-      top: { type: 'number', description: 'Top position. Defaults to 100.' },
-      width: { type: 'number', description: 'Element width. Defaults to 720.' },
-      height: { type: 'number', description: 'Element height. Defaults to 80.' },
-      fontSize: { type: 'number', description: 'Font size. Defaults to 30.' },
-      fontColor: { type: 'string', description: 'Font CSS color. Defaults to #333333.' },
-      bold: { type: 'boolean', description: 'Whether text is bold.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加文本')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'add-slide-text', message: `已向第 ${args.slideIndex + 1} 张幻灯片添加文本。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_add_shape',
-    description: 'Add a real editable Univer Slides shape. Supports rect, roundRect, ellipse, diamond, triangle, parallelogram, hexagon, star5 and other ShapeTypeEnum values. Set fillColor to transparent or strokeColor to none to remove fill or outline.',
-    parameters: {
-      slideIndex: { type: 'integer', required: true, description: 'Zero-based slide index.' },
-      shapeType: { type: 'string', required: true, description: 'Univer ShapeTypeEnum value, for example rect, roundRect, ellipse, diamond, triangle, hexagon, or star5.' },
-      left: { type: 'number', description: 'Left position in slide canvas units.' },
-      top: { type: 'number', description: 'Top position in slide canvas units.' },
-      width: { type: 'number', description: 'Shape width.' },
-      height: { type: 'number', description: 'Shape height.' },
-      fillColor: { type: 'string', description: 'Fill color such as #2563eb; use transparent for no fill.' },
-      strokeColor: { type: 'string', description: 'Outline color; use none for no outline.' },
-      strokeWidth: { type: 'number', description: 'Outline width. Defaults to 1.5.' },
-      opacity: { type: 'number', description: 'Opacity from 0 to 1.' },
-      selectable: { type: 'boolean', description: 'Whether the editor should show/select the shape. Defaults to true so users can select and edit it.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能添加形状')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'add-slide-shape', message: `已向第 ${args.slideIndex + 1} 张幻灯片添加 ${args.shapeType} 形状。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_update_text',
-    description: 'Update a text element by id in the current Univer presentation. Use univer_slide_list first to inspect element ids.',
-    parameters: {
-      slideIndex: { type: 'integer', required: true, description: 'Zero-based slide index.' },
-      elementId: { type: 'string', required: true, description: 'Text element id.' },
-      text: { type: 'string', description: 'Replacement text.' },
-      left: { type: 'number', description: 'New left position.' },
-      top: { type: 'number', description: 'New top position.' },
-      width: { type: 'number', description: 'New width.' },
-      height: { type: 'number', description: 'New height.' },
-      fontSize: { type: 'number', description: 'New font size.' },
-      fontColor: { type: 'string', description: 'New font CSS color.' },
-      bold: { type: 'boolean', description: 'Whether text is bold.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能更新文本')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'update-slide-text', message: `已更新幻灯片文本元素“${args.elementId}”。` }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'univer_slide_delete_element',
-    description: 'Delete an element by id from a slide in the current Univer presentation. Use univer_slide_list first to inspect element ids.',
-    parameters: {
-      slideIndex: { type: 'integer', required: true, description: 'Zero-based slide index.' },
-      elementId: { type: 'string', required: true, description: 'Element id.' },
-    },
-    output,
-    async execute(args, exec) {
-      const sessionId = sheetOwnerSessionId(exec.agent)
-      if (sessionId === undefined) throw new Error('无法确定当前会话，不能删除元素')
-      requireActiveSlide(sessionId)
-      return { ok: true, action: 'delete-slide-element', message: `已删除幻灯片元素“${args.elementId}”。` }
-    },
-  }))
 }

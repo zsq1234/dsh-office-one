@@ -76,14 +76,14 @@ type SheetOperation =
     }
 
 type DocOperation =
-  | { seq: number; action: 'new-doc'; title?: string; text?: string }
-  | { seq: number; action: 'get-doc-text' }
-  | { seq: number; action: 'set-doc-text'; text: string }
-  | { seq: number; action: 'insert-doc-text'; index: number; text: string }
-  | { seq: number; action: 'append-doc-text'; text: string }
-  | { seq: number; action: 'delete-doc-range'; start: number; end: number }
+  | { seq: SheetOperationId; action: 'new-doc'; title?: string; text?: string }
+  | { seq: SheetOperationId; action: 'get-doc-text' }
+  | { seq: SheetOperationId; action: 'set-doc-text'; text: string }
+  | { seq: SheetOperationId; action: 'insert-doc-text'; index: number; text: string }
+  | { seq: SheetOperationId; action: 'append-doc-text'; text: string }
+  | { seq: SheetOperationId; action: 'delete-doc-range'; start: number; end: number }
   | {
-      seq: number
+      seq: SheetOperationId
       action: 'format-doc-text'
       start: number
       end: number
@@ -94,12 +94,12 @@ type DocOperation =
     }
 
 type SlideOperation =
-  | { seq: number; action: 'new-slide'; title?: string; width?: number; height?: number }
-  | { seq: number; action: 'list-slides' }
-  | { seq: number; action: 'add-slide'; title?: string; index?: number }
-  | { seq: number; action: 'delete-slide'; index: number }
+  | { seq: SheetOperationId; action: 'new-slide'; title?: string; width?: number; height?: number }
+  | { seq: SheetOperationId; action: 'list-slides' }
+  | { seq: SheetOperationId; action: 'add-slide'; title?: string; index?: number }
+  | { seq: SheetOperationId; action: 'delete-slide'; index: number }
   | {
-      seq: number
+      seq: SheetOperationId
       action: 'add-slide-text'
       slideIndex: number
       text: string
@@ -112,7 +112,7 @@ type SlideOperation =
       bold?: boolean
     }
   | {
-      seq: number
+      seq: SheetOperationId
       action: 'update-slide-text'
       slideIndex: number
       elementId: string
@@ -125,9 +125,9 @@ type SlideOperation =
       fontColor?: string
       bold?: boolean
     }
-  | { seq: number; action: 'delete-slide-element'; slideIndex: number; elementId: string }
+  | { seq: SheetOperationId; action: 'delete-slide-element'; slideIndex: number; elementId: string }
   | {
-      seq: number
+      seq: SheetOperationId
       action: 'add-slide-shape'
       slideIndex: number
       shapeType: string
@@ -223,9 +223,19 @@ function operationFromNode(node: ConversationNode): SheetOperation | null {
   }
 }
 
-interface QueuedSheetOperation {
+interface QueuedUniverOperation {
   id: string
+  unitType: UniverUnitType
   operation: Record<string, unknown>
+  createdAt?: number
+}
+
+interface ProductViewProps extends ConvViewProps {
+  queuedOperations: QueuedUniverOperation[]
+  codeRequests: UniverCodeRequest[]
+  sheetScreenshotRequests: SheetScreenshotRequest[]
+  docScreenshotRequests: DocScreenshotRequest[]
+  slideScreenshotRequests: SlideScreenshotRequest[]
 }
 
 interface SlideScreenshotRequest {
@@ -234,9 +244,18 @@ interface SlideScreenshotRequest {
   mode: 'slide' | 'editor'
 }
 
+interface SheetScreenshotRequest {
+  id: string
+  mode: 'sheet' | 'editor'
+  scroll: 'none' | 'up' | 'down' | 'left' | 'right' | 'top' | 'bottom' | 'start' | 'end'
+  amount?: number
+}
+
 interface DocScreenshotRequest {
   id: string
   mode: 'document' | 'editor'
+  scroll: 'none' | 'up' | 'down' | 'top' | 'bottom'
+  amount?: number
 }
 
 interface UniverCodeRequest {
@@ -245,17 +264,121 @@ interface UniverCodeRequest {
   code: string
 }
 
+interface UniverTasks {
+  operations: QueuedUniverOperation[]
+  codeRequests: UniverCodeRequest[]
+  sheetScreenshotRequests: SheetScreenshotRequest[]
+  docScreenshotRequests: DocScreenshotRequest[]
+  slideScreenshotRequests: SlideScreenshotRequest[]
+}
+
+const EMPTY_UNIVER_TASKS: UniverTasks = {
+  operations: [],
+  codeRequests: [],
+  sheetScreenshotRequests: [],
+  docScreenshotRequests: [],
+  slideScreenshotRequests: [],
+}
+
 interface UniverCodeRuntime {
   univerAPI: FUniver
   save: () => unknown
 }
 
-function parseQueuedSheetOperation(value: unknown): SheetOperation | null {
+function parseQueuedUniverOperation(value: unknown): QueuedUniverOperation | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
-  const queued = value as Partial<QueuedSheetOperation>
-  if (typeof queued.id !== 'string' || queued.operation === null || typeof queued.operation !== 'object' || Array.isArray(queued.operation)) return null
-  const action = queued.operation.action
-  return typeof action === 'string' ? sheetOperationFromArgs(action, queued.operation, queued.id) : null
+  const queued = value as Partial<QueuedUniverOperation>
+  if (
+    typeof queued.id !== 'string'
+    || (queued.unitType !== 'sheet' && queued.unitType !== 'doc' && queued.unitType !== 'slide')
+    || queued.operation === null
+    || typeof queued.operation !== 'object'
+    || Array.isArray(queued.operation)
+    || typeof queued.operation.action !== 'string'
+  ) return null
+  return {
+    id: queued.id,
+    unitType: queued.unitType,
+    operation: queued.operation,
+    ...(typeof queued.createdAt === 'number' ? { createdAt: queued.createdAt } : {}),
+  }
+}
+
+function parseUniverCodeRequest(value: unknown): UniverCodeRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const request = value as Partial<UniverCodeRequest>
+  if (
+    typeof request.id !== 'string'
+    || (request.unitType !== 'sheet' && request.unitType !== 'doc' && request.unitType !== 'slide')
+    || typeof request.code !== 'string'
+  ) return null
+  return { id: request.id, unitType: request.unitType, code: request.code }
+}
+
+function parseSheetScreenshotRequest(value: unknown): SheetScreenshotRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const request = value as Partial<SheetScreenshotRequest>
+  const validScroll = request.scroll === 'none' || request.scroll === 'up' || request.scroll === 'down' || request.scroll === 'left' || request.scroll === 'right' || request.scroll === 'top' || request.scroll === 'bottom' || request.scroll === 'start' || request.scroll === 'end'
+  return typeof request.id === 'string' && (request.mode === 'sheet' || request.mode === 'editor') && validScroll
+    ? { id: request.id, mode: request.mode, scroll: request.scroll!, ...(typeof request.amount === 'number' ? { amount: request.amount } : {}) }
+    : null
+}
+
+function parseDocScreenshotRequest(value: unknown): DocScreenshotRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const request = value as Partial<DocScreenshotRequest>
+  const validScroll = request.scroll === 'none' || request.scroll === 'up' || request.scroll === 'down' || request.scroll === 'top' || request.scroll === 'bottom'
+  return typeof request.id === 'string' && (request.mode === 'document' || request.mode === 'editor') && validScroll
+    ? { id: request.id, mode: request.mode, scroll: request.scroll!, ...(typeof request.amount === 'number' ? { amount: request.amount } : {}) }
+    : null
+}
+
+function parseSlideScreenshotRequest(value: unknown): SlideScreenshotRequest | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const request = value as Partial<SlideScreenshotRequest>
+  return typeof request.id === 'string'
+    && typeof request.slideIndex === 'number'
+    && (request.mode === 'slide' || request.mode === 'editor')
+    ? { id: request.id, slideIndex: request.slideIndex, mode: request.mode }
+    : null
+}
+
+function queuedSheetOperation(queued: QueuedUniverOperation): SheetOperation | null {
+  return queued.unitType === 'sheet'
+    ? sheetOperationFromArgs(String(queued.operation.action), queued.operation, queued.id)
+    : null
+}
+
+const DOC_OPERATION_ACTIONS = new Set(['new-doc', 'set-doc-text', 'insert-doc-text', 'append-doc-text', 'delete-doc-range', 'format-doc-text'])
+const SLIDE_OPERATION_ACTIONS = new Set(['new-slide', 'add-slide', 'delete-slide', 'add-slide-text', 'add-slide-shape', 'update-slide-text', 'delete-slide-element'])
+
+function queuedDocOperation(queued: QueuedUniverOperation): DocOperation | null {
+  if (queued.unitType !== 'doc' || !DOC_OPERATION_ACTIONS.has(String(queued.operation.action))) return null
+  return { ...queued.operation, seq: queued.id } as DocOperation
+}
+
+function queuedSlideOperation(queued: QueuedUniverOperation): SlideOperation | null {
+  if (queued.unitType !== 'slide' || !SLIDE_OPERATION_ACTIONS.has(String(queued.operation.action))) return null
+  return { ...queued.operation, seq: queued.id } as SlideOperation
+}
+
+async function commitOperations(
+  sessionId: string,
+  unitType: UniverUnitType,
+  snapshot: unknown,
+  operationIds: string[],
+): Promise<void> {
+  if (operationIds.length === 0) return
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'commit-operations', {
+    sessionId,
+    unitType,
+    snapshot,
+    operationIds,
+    clientId: univerCodeClientId,
+  })
+  if (!result.ok) throw new Error(result.error.message)
 }
 
 const DOC_TOOL_NAMES = new Set([
@@ -880,6 +1003,7 @@ async function executeFacadeCode(code: string, univerAPI: FUniver): Promise<{ re
 function useUniverCodeExecutor(
   sessionId: string,
   unitType: UniverUnitType,
+  requests: UniverCodeRequest[],
   ready: boolean,
   runtimeRef: React.MutableRefObject<MountedRuntime | MountedSlideRuntime | null>,
   savingRef: React.MutableRefObject<boolean>,
@@ -887,89 +1011,139 @@ function useUniverCodeExecutor(
   lastSavedRef: React.MutableRefObject<string | null>,
 ): void {
   const inFlightRef = useRef(new Set<string>())
+  const mountedRef = useRef(true)
   useEffect(() => {
-    let disposed = false
-    let polling = false
-    const poll = async () => {
-      if (!ready || polling || runtimeRef.current === null || savingRef.current) return
-      polling = true
-      try {
-        const connection = clientConnection.current
-        if (connection === null) return
-        const response = await connection.rpc.call('/dsh-univer-create', 'univer-code-requests', { sessionId, unitType })
-        if (!response.ok || disposed || !Array.isArray(response.value)) return
-        for (const rawRequest of response.value) {
-          if (rawRequest === null || typeof rawRequest !== 'object') continue
-          const request = rawRequest as Partial<UniverCodeRequest>
-          if (typeof request.id !== 'string' || request.unitType !== unitType || typeof request.code !== 'string') continue
-          if (inFlightRef.current.has(request.id)) continue
-          const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
-            sessionId,
-            codeRequestId: request.id,
-            clientId: univerCodeClientId,
-          })
-          if (!claimed.ok || claimed.value === null || disposed) continue
-          inFlightRef.current.add(request.id)
-          let execution: { result?: string; logs: string[]; error?: string } = { logs: [] }
-          try {
-            await pendingSaveRef.current
-            const runtime = runtimeRef.current
-            if (disposed || runtime === null) throw new Error(`当前浏览器没有打开已创建的 Univer ${unitType}`)
-            savingRef.current = true
-            debugUniverCode(sessionId, unitType, request.id, request.code)
-            execution = await executeFacadeCode(request.code, runtime.univerAPI)
-            if (execution.error === undefined) {
-              const snapshot = unitType === 'slide'
-                ? (runtime as MountedSlideRuntime).presentation.save()
-                : unitType === 'doc'
-                  ? runtime.univerAPI.getActiveDocument()?.save()
-                  : runtime.univerAPI.getActiveWorkbook()?.save()
-              if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${unitType}`)
-              const serialized = JSON.stringify(snapshot)
-              const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType, snapshot })
-              if (!saved.ok) throw new Error(saved.error.message)
-              lastSavedRef.current = serialized
-            }
-          } catch (reason) {
-            execution = {
-              error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
-              logs: execution.logs,
-            }
-          } finally {
-            savingRef.current = false
-          }
-          await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
-            sessionId,
-            codeRequestId: request.id,
-            clientId: univerCodeClientId,
-            ...execution,
-          }).catch(() => {})
-          inFlightRef.current.delete(request.id)
-        }
-      } finally {
-        polling = false
-      }
-    }
-    void poll().catch(() => {})
-    const timer = window.setInterval(() => void poll().catch(() => {}), 300)
+    mountedRef.current = true
     return () => {
-      disposed = true
-      window.clearInterval(timer)
+      mountedRef.current = false
       inFlightRef.current.clear()
     }
-  }, [sessionId, unitType, ready, runtimeRef, savingRef, pendingSaveRef, lastSavedRef])
+  }, [])
+  useEffect(() => {
+    if (!ready || runtimeRef.current === null || savingRef.current) return
+    const connection = clientConnection.current
+    if (connection === null) return
+    for (const request of requests) {
+      if (request.unitType !== unitType || inFlightRef.current.has(request.id)) continue
+      inFlightRef.current.add(request.id)
+      void (async () => {
+        const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
+          sessionId,
+          codeRequestId: request.id,
+          clientId: univerCodeClientId,
+        })
+        if (!claimed.ok || claimed.value === null || !mountedRef.current) return
+        let execution: { result?: string; logs: string[]; error?: string } = { logs: [] }
+        try {
+          await pendingSaveRef.current
+          const runtime = runtimeRef.current
+          if (!mountedRef.current || runtime === null) throw new Error(`当前浏览器没有打开已创建的 Univer ${unitType}`)
+          savingRef.current = true
+          debugUniverCode(sessionId, unitType, request.id, request.code)
+          execution = await executeFacadeCode(request.code, runtime.univerAPI)
+          if (execution.error === undefined) {
+            const snapshot = unitType === 'slide'
+              ? (runtime as MountedSlideRuntime).presentation.save()
+              : unitType === 'doc'
+                ? runtime.univerAPI.getActiveDocument()?.save()
+                : runtime.univerAPI.getActiveWorkbook()?.save()
+            if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${unitType}`)
+            const serialized = JSON.stringify(snapshot)
+            const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType, snapshot })
+            if (!saved.ok) throw new Error(saved.error.message)
+            lastSavedRef.current = serialized
+          }
+        } catch (reason) {
+          execution = {
+            error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
+            logs: execution.logs,
+          }
+        } finally {
+          savingRef.current = false
+        }
+        await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
+          sessionId,
+          codeRequestId: request.id,
+          clientId: univerCodeClientId,
+          ...execution,
+        }).catch(() => {})
+      })().finally(() => inFlightRef.current.delete(request.id))
+    }
+  }, [sessionId, unitType, requests, ready, runtimeRef, savingRef, pendingSaveRef, lastSavedRef])
 }
 
 // Browser-lifetime markers control only the initial loading presentation.
 // Persisted Host state, not these markers, decides whether a unit exists.
+async function captureRenderedSheet(
+  runtime: MountedRuntime,
+  request: SheetScreenshotRequest,
+): Promise<{ dataUrl: string; width: number; height: number; scrollTop: number; scrollHeight: number; viewportHeight: number; scrollLeft: number; scrollWidth: number; viewportWidth: number }> {
+  const elements = [runtime.mount, ...runtime.mount.querySelectorAll<HTMLElement>('*')]
+  const verticalScroller = elements.filter((element) => element.clientHeight >= 120 && element.scrollHeight > element.clientHeight + 8)
+    .sort((left, right) => (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0] ?? null
+  const horizontalScroller = elements.filter((element) => element.clientWidth >= 200 && element.scrollWidth > element.clientWidth + 8)
+    .sort((left, right) => (right.scrollWidth - right.clientWidth) - (left.scrollWidth - left.clientWidth))[0] ?? null
+  const canvas = [...runtime.mount.querySelectorAll('canvas')]
+    .sort((left, right) => right.getBoundingClientRect().width * right.getBoundingClientRect().height - left.getBoundingClientRect().width * left.getBoundingClientRect().height)[0]
+  const verticalAmount = Math.max(1, request.amount ?? (verticalScroller?.clientHeight ?? runtime.mount.clientHeight) * 0.8)
+  const horizontalAmount = Math.max(1, request.amount ?? (horizontalScroller?.clientWidth ?? runtime.mount.clientWidth) * 0.8)
+  let deltaX = 0
+  let deltaY = 0
+  if (request.scroll === 'up') deltaY = -verticalAmount
+  else if (request.scroll === 'down') deltaY = verticalAmount
+  else if (request.scroll === 'left') deltaX = -horizontalAmount
+  else if (request.scroll === 'right') deltaX = horizontalAmount
+  if (request.scroll === 'top') verticalScroller?.scrollTo({ top: 0, behavior: 'auto' })
+  else if (request.scroll === 'bottom') verticalScroller?.scrollTo({ top: verticalScroller.scrollHeight, behavior: 'auto' })
+  else if (request.scroll === 'start') horizontalScroller?.scrollTo({ left: 0, behavior: 'auto' })
+  else if (request.scroll === 'end') horizontalScroller?.scrollTo({ left: horizontalScroller.scrollWidth, behavior: 'auto' })
+  else {
+    if (deltaY !== 0 && verticalScroller !== null) verticalScroller.scrollBy({ top: deltaY, behavior: 'auto' })
+    if (deltaX !== 0 && horizontalScroller !== null) horizontalScroller.scrollBy({ left: deltaX, behavior: 'auto' })
+  }
+  if ((request.scroll !== 'none') && ((deltaY !== 0 && verticalScroller === null) || (deltaX !== 0 && horizontalScroller === null) || ((request.scroll === 'top' || request.scroll === 'bottom') && verticalScroller === null) || ((request.scroll === 'start' || request.scroll === 'end') && horizontalScroller === null))) {
+    canvas?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, deltaY }))
+  }
+  window.dispatchEvent(new Event('resize'))
+  if (document.fonts?.ready !== undefined) await document.fonts.ready
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
+  await waitForAnimationFrames(3)
+
+  const mountRect = runtime.mount.getBoundingClientRect()
+  const layers = [...runtime.mount.querySelectorAll('canvas')].map((layer) => ({ layer, rect: layer.getBoundingClientRect() }))
+    .filter(({ layer, rect }) => layer.width >= 20 && layer.height >= 20 && rect.width > 0 && rect.height > 0)
+  if (layers.length === 0) throw new Error('没有找到已渲染的工作表画布')
+  const outputWidth = Math.max(1, Math.min(1600, Math.round(mountRect.width * Math.min(window.devicePixelRatio || 1, 2))))
+  const outputHeight = Math.max(1, Math.round(outputWidth * mountRect.height / mountRect.width))
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = outputWidth
+  outputCanvas.height = outputHeight
+  const context = outputCanvas.getContext('2d')
+  if (context === null) throw new Error('浏览器无法创建工作表截图画布')
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, outputWidth, outputHeight)
+  const scaleX = outputWidth / mountRect.width
+  const scaleY = outputHeight / mountRect.height
+  for (const { layer, rect } of layers) {
+    context.drawImage(layer, (rect.left - mountRect.left) * scaleX, (rect.top - mountRect.top) * scaleY, rect.width * scaleX, rect.height * scaleY)
+  }
+  return {
+    dataUrl: outputCanvas.toDataURL('image/png'), width: outputWidth, height: outputHeight,
+    scrollTop: verticalScroller?.scrollTop ?? 0,
+    scrollHeight: verticalScroller?.scrollHeight ?? mountRect.height,
+    viewportHeight: verticalScroller?.clientHeight ?? mountRect.height,
+    scrollLeft: horizontalScroller?.scrollLeft ?? 0,
+    scrollWidth: horizontalScroller?.scrollWidth ?? mountRect.width,
+    viewportWidth: horizontalScroller?.clientWidth ?? mountRect.width,
+  }
+}
+
 const openedWorkbookSessions = new Set<string>()
 
-function SheetProductView(props: ConvViewProps) {
+function SheetProductView(props: ProductViewProps) {
   const { sessionId } = props
   const { nodes, partialText } = useConversationFeed(props)
-  const conversationOperations = useMemo(() => nodes.map(operationFromNode).filter((item): item is SheetOperation => item !== null), [nodes])
-  const [queuedOperations, setQueuedOperations] = useState<SheetOperation[]>([])
-  const operations = useMemo(() => [...conversationOperations, ...queuedOperations], [conversationOperations, queuedOperations])
+  const operations = useMemo(() => props.queuedOperations.map(queuedSheetOperation).filter((item): item is SheetOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
@@ -996,7 +1170,8 @@ function SheetProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
-  useUniverCodeExecutor(sessionId, 'sheet', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
+  const sheetScreenshotInFlightRef = useRef(new Set<string>())
+  useUniverCodeExecutor(sessionId, 'sheet', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const queuedPersistingRef = useRef(false)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
@@ -1012,34 +1187,6 @@ function SheetProductView(props: ConvViewProps) {
     const stream = chatStreamRef.current
     if (stream !== null) stream.scrollTop = stream.scrollHeight
   }, [chatLines, partialText])
-
-  useEffect(() => {
-    let cancelled = false
-    const loadQueuedOperations = async () => {
-      const connection = clientConnection.current
-      const container = containerRef.current
-      // Conversation views can remain mounted while another tab or a Workspace
-      // preview is active. Do not keep polling the Host from that hidden view.
-      if (
-        connection === null
-        || document.visibilityState !== 'visible'
-        || container === null
-        || container.getClientRects().length === 0
-        || getComputedStyle(container).visibility === 'hidden'
-      ) return
-      const result = await connection.rpc.call('/dsh-univer-create', 'sheet-operations', { sessionId, unitType: 'sheet' })
-      if (cancelled || !result.ok || !Array.isArray(result.value)) return
-      const parsed = result.value.map(parseQueuedSheetOperation).filter((item): item is SheetOperation => item !== null)
-      setQueuedOperations(parsed)
-    }
-    void loadQueuedOperations().catch(() => {})
-    const timer = window.setInterval(() => void loadQueuedOperations().catch(() => {}), 500)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-      setQueuedOperations([])
-    }
-  }, [sessionId])
 
   useEffect(() => {
     let cancelled = false
@@ -1140,13 +1287,13 @@ function SheetProductView(props: ConvViewProps) {
       if (runtimeRef.current === null) {
         createRuntime(undefined, hostSnapshot ?? undefined)
         if (hostSnapshot !== null && !hydratedFromHostRef.current) {
-          // The persisted snapshot already contains main-conversation operations,
-          // but queued subagent operations still need to be applied and acknowledged.
-          for (const operation of conversationOperations) appliedRef.current.add(operation.seq)
+          // The Host snapshot is the applied baseline; every persisted queue item
+          // still needs to be replayed and acknowledged exactly once.
           hydratedFromHostRef.current = true
           lastSavedRef.current = JSON.stringify(hostSnapshot)
         }
       }
+      if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
         if (operation.action === 'new') {
@@ -1155,7 +1302,6 @@ function SheetProductView(props: ConvViewProps) {
           setSaveNotice('')
           const blankSnapshot = normalizeWorkbookSnapshot(runtimeRef.current?.univerAPI.getActiveWorkbook()?.save())
           void clientConnection.current?.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot: blankSnapshot, filePath: null })
-          appliedRef.current.clear()
           appliedRef.current.add(operation.seq)
           continue
         }
@@ -1227,32 +1373,28 @@ function SheetProductView(props: ConvViewProps) {
         appliedRef.current.add(operation.seq)
       }
 
-      const queuedIds = queuedOperations
+      const queuedIds = operations
         .map((operation) => operation.seq)
         .filter((id): id is string => typeof id === 'string' && appliedRef.current.has(id))
       if (queuedIds.length > 0 && !queuedPersistingRef.current) {
         queuedPersistingRef.current = true
-        void (async () => {
-          await pendingSaveRef.current
-          const connection = clientConnection.current
+        savingRef.current = true
+        const previousSave = pendingSaveRef.current
+        const commit = (async () => {
+          await previousSave
           const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
-          if (connection === null || workbook === null || workbook === undefined) return
+          if (workbook === null || workbook === undefined) return
           const snapshot = normalizeWorkbookSnapshot(workbook.save())
           const serialized = JSON.stringify(snapshot)
-          const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot })
-          if (!saved.ok) throw new Error(saved.error.message)
-          const acknowledged = await connection.rpc.call('/dsh-univer-create', 'ack-sheet-operations', {
-            sessionId,
-            unitType: 'sheet',
-            operationIds: queuedIds,
-          })
-          if (!acknowledged.ok) throw new Error(acknowledged.error.message)
+          await commitOperations(sessionId, 'sheet', snapshot, queuedIds)
           lastSavedRef.current = serialized
-          const acknowledgedIds = new Set(queuedIds)
-          setQueuedOperations((current) => current.filter((operation) => !acknowledgedIds.has(String(operation.seq))))
-        })().catch((reason) => {
-          setError(`保存子代理表格操作失败：${reason instanceof Error ? reason.message : String(reason)}`)
+        })()
+        pendingSaveRef.current = commit
+        void commit.catch((reason) => {
+          setError(`提交表格队列操作失败：${reason instanceof Error ? reason.message : String(reason)}`)
         }).finally(() => {
+          if (pendingSaveRef.current === commit) pendingSaveRef.current = null
+          savingRef.current = false
           queuedPersistingRef.current = false
         })
       }
@@ -1262,7 +1404,7 @@ function SheetProductView(props: ConvViewProps) {
     }
 
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, conversationOperations, queuedOperations, layoutVersion, sessionId])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1281,13 +1423,41 @@ function SheetProductView(props: ConvViewProps) {
       }).catch((reason) => {
         setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
       }).finally(() => {
-        savingRef.current = false
-        pendingSaveRef.current = null
+        if (pendingSaveRef.current === save) {
+          savingRef.current = false
+          pendingSaveRef.current = null
+        }
       })
       pendingSaveRef.current = save
     }, 800)
     return () => window.clearInterval(timer)
   }, [sessionId])
+
+  useEffect(() => {
+    if (!hostLoaded || !sheetVisible) return
+    const connection = clientConnection.current
+    if (connection === null) return
+    for (const request of props.sheetScreenshotRequests) {
+      if (sheetScreenshotInFlightRef.current.has(request.id)) continue
+      sheetScreenshotInFlightRef.current.add(request.id)
+      void (async () => {
+        try {
+          const runtime = runtimeRef.current
+          if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Sheet')
+          const captured = await captureRenderedSheet(runtime, request)
+          await connection.rpc.call('/dsh-univer-create', 'sheet-screenshot-result', { sessionId, screenshotId: request.id, ...captured })
+        } catch (reason) {
+          await connection.rpc.call('/dsh-univer-create', 'sheet-screenshot-result', {
+            sessionId,
+            screenshotId: request.id,
+            error: reason instanceof Error ? reason.message : String(reason),
+          }).catch(() => {})
+        } finally {
+          sheetScreenshotInFlightRef.current.delete(request.id)
+        }
+      })()
+    }
+  }, [sessionId, hostLoaded, sheetVisible, props.sheetScreenshotRequests])
 
   useLayoutEffect(() => () => {
     const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
@@ -1364,7 +1534,7 @@ function SheetProductView(props: ConvViewProps) {
     runtimeRef.current = null
     // A manually created workbook replaces both the persisted workbook and any
     // conversation operations that belong to the previous workbook.
-    appliedRef.current = new Set(operations.map((operation) => operation.seq))
+    appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
     openedWorkbookSessions.add(sessionId)
@@ -1390,7 +1560,7 @@ function SheetProductView(props: ConvViewProps) {
       runtimeRef.current = null
       // An imported file replaces the conversation-generated workbook. Keep the
       // historical tool calls from replaying over the imported workbook.
-      appliedRef.current = new Set(operations.map((operation) => operation.seq))
+      appliedRef.current.clear()
       hydratedFromHostRef.current = true
       lastSavedRef.current = null
       openedWorkbookSessions.add(sessionId)
@@ -1480,7 +1650,35 @@ function SheetProductView(props: ConvViewProps) {
   )
 }
 
-async function captureRenderedDocument(runtime: MountedRuntime): Promise<{ dataUrl: string; width: number; height: number }> {
+function findDocumentScroller(mount: HTMLElement): HTMLElement | null {
+  const candidates = [mount, ...mount.querySelectorAll<HTMLElement>('*')].filter((element) => (
+    element.clientHeight >= 200 && element.scrollHeight > element.clientHeight + 8
+  ))
+  return candidates.sort((left, right) => {
+    const leftScore = (left.scrollHeight - left.clientHeight) * Math.max(1, left.clientWidth)
+    const rightScore = (right.scrollHeight - right.clientHeight) * Math.max(1, right.clientWidth)
+    return rightScore - leftScore
+  })[0] ?? null
+}
+
+async function captureRenderedDocument(
+  runtime: MountedRuntime,
+  scroll: DocScreenshotRequest['scroll'],
+  amount?: number,
+): Promise<{ dataUrl: string; width: number; height: number; scrollTop: number; scrollHeight: number; viewportHeight: number }> {
+  const scroller = findDocumentScroller(runtime.mount)
+  if (scroll !== 'none' && scroller === null) throw new Error('没有找到可滚动的文档区域')
+  if (scroller !== null) {
+    const distance = Math.max(1, amount ?? scroller.clientHeight * 0.8)
+    const target = scroll === 'top'
+      ? 0
+      : scroll === 'bottom'
+        ? scroller.scrollHeight
+        : scroll === 'up'
+          ? scroller.scrollTop - distance
+          : scroll === 'down' ? scroller.scrollTop + distance : scroller.scrollTop
+    scroller.scrollTo({ top: target, behavior: 'auto' })
+  }
   window.dispatchEvent(new Event('resize'))
   if (document.fonts?.ready !== undefined) await document.fonts.ready
   await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
@@ -1508,15 +1706,22 @@ async function captureRenderedDocument(runtime: MountedRuntime): Promise<{ dataU
   context.fillStyle = '#ffffff'
   context.fillRect(0, 0, outputWidth, outputHeight)
   for (const { canvas } of layers) context.drawImage(canvas, 0, 0, outputWidth, outputHeight)
-  return { dataUrl: outputCanvas.toDataURL('image/png'), width: outputWidth, height: outputHeight }
+  return {
+    dataUrl: outputCanvas.toDataURL('image/png'),
+    width: outputWidth,
+    height: outputHeight,
+    scrollTop: scroller?.scrollTop ?? 0,
+    scrollHeight: scroller?.scrollHeight ?? primary.rect.height,
+    viewportHeight: scroller?.clientHeight ?? primary.rect.height,
+  }
 }
 
 const openedDocumentSessions = new Set<string>()
 
-function DocProductView(props: ConvViewProps) {
+function DocProductView(props: ProductViewProps) {
   const { sessionId } = props
   const { nodes, partialText } = useConversationFeed(props)
-  const operations = useMemo(() => nodes.map(docOperationFromNode).filter((item): item is DocOperation => item !== null), [nodes])
+  const operations = useMemo(() => props.queuedOperations.map(queuedDocOperation).filter((item): item is DocOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
@@ -1524,7 +1729,7 @@ function DocProductView(props: ConvViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(null)
-  const appliedRef = useRef(new Set<number>())
+  const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话文档')
   const [error, setError] = useState<string | null>(null)
@@ -1541,8 +1746,9 @@ function DocProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
+  const queuedPersistingRef = useRef(false)
   const docScreenshotInFlightRef = useRef(new Set<string>())
-  useUniverCodeExecutor(sessionId, 'doc', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
+  useUniverCodeExecutor(sessionId, 'doc', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const [layoutVersion, setLayoutVersion] = useState(0)
 
   useLayoutEffect(() => {
@@ -1655,21 +1861,18 @@ function DocProductView(props: ConvViewProps) {
       if (runtimeRef.current === null) {
         createRuntime(undefined, hostSnapshot ?? undefined)
         if (hostSnapshot !== null && !hydratedFromHostRef.current) {
-          for (const operation of operations) appliedRef.current.add(operation.seq)
           hydratedFromHostRef.current = true
           lastSavedRef.current = JSON.stringify(hostSnapshot)
         }
       }
 
+      if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
         if (operation.action === 'new-doc') {
           createRuntime(operation)
           setFilePath(null)
           setSaveNotice('')
-          const blankSnapshot = runtimeRef.current?.univerAPI.getActiveDocument()?.save()
-          void clientConnection.current?.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'doc', snapshot: blankSnapshot, filePath: null })
-          appliedRef.current.clear()
           appliedRef.current.add(operation.seq)
           continue
         }
@@ -1707,12 +1910,38 @@ function DocProductView(props: ConvViewProps) {
         }
         appliedRef.current.add(operation.seq)
       }
+
+      const queuedIds = operations
+        .map((operation) => operation.seq)
+        .filter((id): id is string => typeof id === 'string' && appliedRef.current.has(id))
+      if (queuedIds.length > 0 && !queuedPersistingRef.current) {
+        queuedPersistingRef.current = true
+        savingRef.current = true
+        const previousSave = pendingSaveRef.current
+        const commit = (async () => {
+          await previousSave
+          const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
+          if (fDocument === null || fDocument === undefined) return
+          const nextSnapshot = fDocument.save()
+          const serialized = JSON.stringify(nextSnapshot)
+          await commitOperations(sessionId, 'doc', nextSnapshot, queuedIds)
+          lastSavedRef.current = serialized
+        })()
+        pendingSaveRef.current = commit
+        void commit.catch((reason) => {
+          setError(`提交文档队列操作失败：${reason instanceof Error ? reason.message : String(reason)}`)
+        }).finally(() => {
+          if (pendingSaveRef.current === commit) pendingSaveRef.current = null
+          savingRef.current = false
+          queuedPersistingRef.current = false
+        })
+      }
       setError(null)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1731,8 +1960,10 @@ function DocProductView(props: ConvViewProps) {
       }).catch((reason) => {
         setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
       }).finally(() => {
-        savingRef.current = false
-        pendingSaveRef.current = null
+        if (pendingSaveRef.current === save) {
+          savingRef.current = false
+          pendingSaveRef.current = null
+        }
       })
       pendingSaveRef.current = save
     }, 800)
@@ -1740,49 +1971,30 @@ function DocProductView(props: ConvViewProps) {
   }, [sessionId])
 
   useEffect(() => {
-    let disposed = false
-    let polling = false
-    const poll = async () => {
-      if (!hostLoaded || !documentVisible || polling) return
-      polling = true
-      try {
-        const connection = clientConnection.current
-        if (connection === null) return
-        const response = await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-requests', { sessionId })
-        if (!response.ok || disposed || !Array.isArray(response.value)) return
-        for (const rawRequest of response.value) {
-          if (rawRequest === null || typeof rawRequest !== 'object') continue
-          const request = rawRequest as Partial<DocScreenshotRequest>
-          if (typeof request.id !== 'string' || (request.mode !== 'document' && request.mode !== 'editor')) continue
-          if (docScreenshotInFlightRef.current.has(request.id)) continue
-          docScreenshotInFlightRef.current.add(request.id)
-          try {
-            const runtime = runtimeRef.current
-            if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Doc')
-            const captured = await captureRenderedDocument(runtime)
-            await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', { sessionId, screenshotId: request.id, ...captured })
-          } catch (reason) {
-            await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', {
-              sessionId,
-              screenshotId: request.id,
-              error: reason instanceof Error ? reason.message : String(reason),
-            }).catch(() => {})
-          } finally {
-            docScreenshotInFlightRef.current.delete(request.id)
-          }
+    if (!hostLoaded || !documentVisible) return
+    const connection = clientConnection.current
+    if (connection === null) return
+    for (const request of props.docScreenshotRequests) {
+      if (docScreenshotInFlightRef.current.has(request.id)) continue
+      docScreenshotInFlightRef.current.add(request.id)
+      void (async () => {
+        try {
+          const runtime = runtimeRef.current
+          if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Doc')
+          const captured = await captureRenderedDocument(runtime, request.scroll ?? 'none', request.amount)
+          await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', { sessionId, screenshotId: request.id, ...captured })
+        } catch (reason) {
+          await connection.rpc.call('/dsh-univer-create', 'doc-screenshot-result', {
+            sessionId,
+            screenshotId: request.id,
+            error: reason instanceof Error ? reason.message : String(reason),
+          }).catch(() => {})
+        } finally {
+          docScreenshotInFlightRef.current.delete(request.id)
         }
-      } finally {
-        polling = false
-      }
+      })()
     }
-    void poll().catch(() => {})
-    const timer = window.setInterval(() => void poll().catch(() => {}), 1000)
-    return () => {
-      disposed = true
-      window.clearInterval(timer)
-      docScreenshotInFlightRef.current.clear()
-    }
-  }, [sessionId, hostLoaded, documentVisible])
+  }, [sessionId, hostLoaded, documentVisible, props.docScreenshotRequests])
 
   useLayoutEffect(() => () => {
     const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
@@ -1819,7 +2031,7 @@ function DocProductView(props: ConvViewProps) {
     runtimeRef.current?.univer.dispose()
     runtimeRef.current?.mount.remove()
     runtimeRef.current = null
-    appliedRef.current = new Set(operations.map((operation) => operation.seq))
+    appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
     openedDocumentSessions.add(sessionId)
@@ -1843,7 +2055,7 @@ function DocProductView(props: ConvViewProps) {
       runtimeRef.current?.univer.dispose()
       runtimeRef.current?.mount.remove()
       runtimeRef.current = null
-      appliedRef.current = new Set(operations.map((operation) => operation.seq))
+      appliedRef.current.clear()
       hydratedFromHostRef.current = true
       lastSavedRef.current = null
       openedDocumentSessions.add(sessionId)
@@ -2048,10 +2260,10 @@ async function captureRenderedSlide(
   return { dataUrl: outputCanvas.toDataURL('image/png'), width: outputWidth, height: outputHeight }
 }
 
-function SlideProductView(props: ConvViewProps) {
+function SlideProductView(props: ProductViewProps) {
   const { sessionId } = props
   const { nodes, partialText } = useConversationFeed(props)
-  const operations = useMemo(() => nodes.map(slideOperationFromNode).filter((item): item is SlideOperation => item !== null), [nodes])
+  const operations = useMemo(() => props.queuedOperations.map(queuedSlideOperation).filter((item): item is SlideOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
     .map(conversationLabel)
     .filter((item): item is { role: string; text: string } => item !== null)
@@ -2059,7 +2271,7 @@ function SlideProductView(props: ConvViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedSlideRuntime | null>(null)
-  const appliedRef = useRef(new Set<number>())
+  const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
   const [title, setTitle] = useState('对话演示文稿')
   const [error, setError] = useState<string | null>(null)
@@ -2076,7 +2288,8 @@ function SlideProductView(props: ConvViewProps) {
   const lastSavedRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
-  useUniverCodeExecutor(sessionId, 'slide', hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
+  const queuedPersistingRef = useRef(false)
+  useUniverCodeExecutor(sessionId, 'slide', props.codeRequests, hostLoaded, runtimeRef, savingRef, pendingSaveRef, lastSavedRef)
   const screenshotInFlightRef = useRef(new Set<string>())
   const slideResizeTimersRef = useRef<number[]>([])
   const [layoutVersion, setLayoutVersion] = useState(0)
@@ -2221,24 +2434,19 @@ function SlideProductView(props: ConvViewProps) {
       if (runtimeRef.current === null) {
         createRuntime(undefined, hostSnapshot ?? undefined)
         if (hostSnapshot !== null && !hydratedFromHostRef.current) {
-          for (const operation of operations) appliedRef.current.add(operation.seq)
           hydratedFromHostRef.current = true
           lastSavedRef.current = JSON.stringify(hostSnapshot)
         }
       }
 
-      let appliedNewOperation = false
+      if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
         if (operation.action === 'new-slide') {
           createRuntime(operation)
           setFilePath(null)
           setSaveNotice('')
-          const blankSnapshot = runtimeRef.current?.presentation.save()
-          void clientConnection.current?.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot: blankSnapshot, filePath: null })
-          appliedRef.current.clear()
           appliedRef.current.add(operation.seq)
-          appliedNewOperation = true
           continue
         }
         if (operation.action === 'list-slides') {
@@ -2365,27 +2573,38 @@ function SlideProductView(props: ConvViewProps) {
           }
         }
         appliedRef.current.add(operation.seq)
-        appliedNewOperation = true
       }
-      if (appliedNewOperation) {
-        const presentation = runtimeRef.current?.presentation
-        const connection = clientConnection.current
-        if (presentation !== undefined && connection !== null) {
+      const queuedIds = operations
+        .map((operation) => operation.seq)
+        .filter((id): id is string => typeof id === 'string' && appliedRef.current.has(id))
+      if (queuedIds.length > 0 && !queuedPersistingRef.current) {
+        queuedPersistingRef.current = true
+        savingRef.current = true
+        const previousSave = pendingSaveRef.current
+        const commit = (async () => {
+          await previousSave
+          const presentation = runtimeRef.current?.presentation
+          if (presentation === undefined) return
           const nextSnapshot = presentation.save()
           const serialized = JSON.stringify(nextSnapshot)
-          void connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot: nextSnapshot }).then((result) => {
-            if (result.ok) lastSavedRef.current = serialized
-          }).catch((reason) => {
-            setError(`操作后保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
-          })
-        }
+          await commitOperations(sessionId, 'slide', nextSnapshot, queuedIds)
+          lastSavedRef.current = serialized
+        })()
+        pendingSaveRef.current = commit
+        void commit.catch((reason) => {
+          setError(`提交幻灯片队列操作失败：${reason instanceof Error ? reason.message : String(reason)}`)
+        }).finally(() => {
+          if (pendingSaveRef.current === commit) pendingSaveRef.current = null
+          savingRef.current = false
+          queuedPersistingRef.current = false
+        })
       }
       setError(null)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
     return undefined
-  }, [hostLoaded, hostSnapshot, operations, layoutVersion])
+  }, [hostLoaded, hostSnapshot, operations, layoutVersion, sessionId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -2404,8 +2623,10 @@ function SlideProductView(props: ConvViewProps) {
       }).catch((reason) => {
         setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
       }).finally(() => {
-        savingRef.current = false
-        pendingSaveRef.current = null
+        if (pendingSaveRef.current === save) {
+          savingRef.current = false
+          pendingSaveRef.current = null
+        }
       })
       pendingSaveRef.current = save
     }, 800)
@@ -2413,22 +2634,13 @@ function SlideProductView(props: ConvViewProps) {
   }, [sessionId])
 
   useEffect(() => {
-    let disposed = false
-    let polling = false
-    const poll = async () => {
-      if (!hostLoaded || !presentationVisible || polling) return
-      polling = true
-      try {
-        const connection = clientConnection.current
-        if (connection === null) return
-        const response = await connection.rpc.call('/dsh-univer-create', 'slide-screenshot-requests', { sessionId })
-      if (!response.ok || disposed || !Array.isArray(response.value)) return
-      for (const rawRequest of response.value) {
-        if (rawRequest === null || typeof rawRequest !== 'object') continue
-        const request = rawRequest as Partial<SlideScreenshotRequest>
-        if (typeof request.id !== 'string' || typeof request.slideIndex !== 'number' || (request.mode !== 'slide' && request.mode !== 'editor')) continue
-        if (screenshotInFlightRef.current.has(request.id)) continue
-        screenshotInFlightRef.current.add(request.id)
+    if (!hostLoaded || !presentationVisible) return
+    const connection = clientConnection.current
+    if (connection === null) return
+    for (const request of props.slideScreenshotRequests) {
+      if (screenshotInFlightRef.current.has(request.id)) continue
+      screenshotInFlightRef.current.add(request.id)
+      void (async () => {
         try {
           const runtime = runtimeRef.current
           if (runtime === null) throw new Error('当前浏览器没有打开已渲染的 Univer Slide')
@@ -2447,36 +2659,9 @@ function SlideProductView(props: ConvViewProps) {
         } finally {
           screenshotInFlightRef.current.delete(request.id)
         }
-      }
-      } finally {
-        polling = false
-      }
+      })()
     }
-    void poll().catch(() => {})
-    const timer = window.setInterval(() => void poll().catch(() => {}), 1000)
-    return () => {
-      disposed = true
-      window.clearInterval(timer)
-      screenshotInFlightRef.current.clear()
-    }
-  }, [sessionId, hostLoaded, presentationVisible])
-
-  useEffect(() => {
-    const sendHeartbeat = () => {
-      const connection = clientConnection.current
-      const container = containerRef.current
-      if (connection === null || container === null) return
-      const active = getComputedStyle(container).visibility !== 'hidden'
-      void connection.rpc.call('/dsh-univer-create', 'slide-runtime-heartbeat', { sessionId, active }).catch(() => {})
-    }
-    sendHeartbeat()
-    const timer = window.setInterval(sendHeartbeat, 1000)
-    return () => {
-      window.clearInterval(timer)
-      const connection = clientConnection.current
-      if (connection !== null) void connection.rpc.call('/dsh-univer-create', 'slide-runtime-heartbeat', { sessionId, active: false }).catch(() => {})
-    }
-  }, [sessionId])
+  }, [sessionId, hostLoaded, presentationVisible, props.slideScreenshotRequests])
 
   useLayoutEffect(() => () => {
     const presentation = runtimeRef.current?.presentation
@@ -2516,7 +2701,7 @@ function SlideProductView(props: ConvViewProps) {
     runtimeRef.current?.univer.dispose()
     runtimeRef.current?.mount.remove()
     runtimeRef.current = null
-    appliedRef.current = new Set(operations.map((operation) => operation.seq))
+    appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
     openedPresentationSessions.add(sessionId)
@@ -2655,6 +2840,8 @@ const selectedUnitBySession = new Map<string, UniverUnitType>()
 
 function UniverView(props: ConvViewProps) {
   const { nodes } = useConversationFeed(props)
+  const shellRef = useRef<HTMLElement>(null)
+  const [tasks, setTasks] = useState<UniverTasks>(EMPTY_UNIVER_TASKS)
   const suggestedUnit = useMemo<UniverUnitType>(() => {
     for (let index = nodes.length - 1; index >= 0; index -= 1) {
       const node = nodes[index]!
@@ -2672,29 +2859,74 @@ function UniverView(props: ConvViewProps) {
     return 'sheet'
   }, [nodes])
   const [unitType, setUnitType] = useState<UniverUnitType>(() => selectedUnitBySession.get(props.sessionId) ?? suggestedUnit)
+  const activeUnitRef = useRef(unitType)
+  useEffect(() => { activeUnitRef.current = unitType }, [unitType])
+  // Apply one durable operation per commit. This keeps every persisted snapshot
+  // aligned with exactly one queue transition and prevents a poison item from
+  // causing an earlier, successfully-mutated prefix to be replayed.
+  const dispatchOperations = useMemo(() => tasks.operations.slice(0, 1), [tasks.operations])
 
   useEffect(() => {
     let disposed = false
-    const selectPendingCodeTarget = async () => {
+    let polling = false
+    const pollTasks = async () => {
       const connection = clientConnection.current
-      if (connection === null) return
-      const response = await connection.rpc.call('/dsh-univer-create', 'univer-code-target', { sessionId: props.sessionId })
-      if (!response.ok || disposed || !Array.isArray(response.value)) return
-      const request = response.value.find((item: unknown) => item !== null && typeof item === 'object' && (
-        (item as { unitType?: unknown }).unitType === 'sheet'
-        || (item as { unitType?: unknown }).unitType === 'doc'
-        || (item as { unitType?: unknown }).unitType === 'slide'
-      )) as { unitType?: UniverUnitType } | undefined
-      if (request?.unitType !== undefined) {
-        selectedUnitBySession.set(props.sessionId, request.unitType)
-        setUnitType(request.unitType)
+      const shell = shellRef.current
+      if (
+        connection === null
+        || polling
+        || document.visibilityState !== 'visible'
+        || shell === null
+        || shell.getClientRects().length === 0
+      ) return
+      polling = true
+      try {
+        const response = await connection.rpc.call('/dsh-univer-create', 'tasks', {
+          sessionId: props.sessionId,
+          clientId: univerCodeClientId,
+          activeUnit: activeUnitRef.current,
+        })
+        if (!response.ok || disposed || response.value === null || typeof response.value !== 'object') return
+        const value = response.value as Record<string, unknown>
+        const nextTasks: UniverTasks = {
+          operations: Array.isArray(value.operations)
+            ? value.operations.map(parseQueuedUniverOperation).filter((item): item is QueuedUniverOperation => item !== null)
+            : [],
+          codeRequests: Array.isArray(value.codeRequests)
+            ? value.codeRequests.map(parseUniverCodeRequest).filter((item): item is UniverCodeRequest => item !== null)
+            : [],
+          sheetScreenshotRequests: Array.isArray(value.sheetScreenshotRequests)
+            ? value.sheetScreenshotRequests.map(parseSheetScreenshotRequest).filter((item): item is SheetScreenshotRequest => item !== null)
+            : [],
+          docScreenshotRequests: Array.isArray(value.docScreenshotRequests)
+            ? value.docScreenshotRequests.map(parseDocScreenshotRequest).filter((item): item is DocScreenshotRequest => item !== null)
+            : [],
+          slideScreenshotRequests: Array.isArray(value.slideScreenshotRequests)
+            ? value.slideScreenshotRequests.map(parseSlideScreenshotRequest).filter((item): item is SlideScreenshotRequest => item !== null)
+            : [],
+        }
+        setTasks(nextTasks)
+        const target = nextTasks.operations[0]?.unitType
+          ?? nextTasks.codeRequests[0]?.unitType
+          ?? (nextTasks.sheetScreenshotRequests.length > 0 ? 'sheet' : undefined)
+          ?? (nextTasks.docScreenshotRequests.length > 0 ? 'doc' : undefined)
+          ?? (nextTasks.slideScreenshotRequests.length > 0 ? 'slide' : undefined)
+        if (target !== undefined) {
+          selectedUnitBySession.set(props.sessionId, target)
+          activeUnitRef.current = target
+          setUnitType(target)
+        }
+      } finally {
+        polling = false
       }
     }
-    void selectPendingCodeTarget().catch(() => {})
-    const timer = window.setInterval(() => void selectPendingCodeTarget().catch(() => {}), 300)
+    setTasks(EMPTY_UNIVER_TASKS)
+    void pollTasks().catch(() => {})
+    const timer = window.setInterval(() => void pollTasks().catch(() => {}), 500)
     return () => {
       disposed = true
       window.clearInterval(timer)
+      setTasks(EMPTY_UNIVER_TASKS)
     }
   }, [props.sessionId])
 
@@ -2709,20 +2941,20 @@ function UniverView(props: ConvViewProps) {
   }
 
   return (
-    <section className="dsh-univer-create-shell" aria-label="Univer Sheet、Doc 与 Slide">
+    <section ref={shellRef} className="dsh-univer-create-shell" aria-label="Univer Sheet、Doc 与 Slide">
       <nav className="dsh-univer-create-product-bar" aria-label="选择 Univer 编辑器">
         <button className={`dsh-univer-create-product-tab${unitType === 'sheet' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'sheet'} onClick={() => selectUnit('sheet')}>Sheet</button>
         <button className={`dsh-univer-create-product-tab${unitType === 'doc' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'doc'} onClick={() => selectUnit('doc')}>Doc</button>
         <button className={`dsh-univer-create-product-tab${unitType === 'slide' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'slide'} onClick={() => selectUnit('slide')}>Slide</button>
       </nav>
       <div className={`dsh-univer-create-product-pane${unitType === 'sheet' ? ' is-active' : ''}`} aria-hidden={unitType !== 'sheet'}>
-        <SheetProductView key={`${props.sessionId}:sheet`} {...props} />
+        <SheetProductView key={`${props.sessionId}:sheet`} {...props} queuedOperations={dispatchOperations} codeRequests={tasks.codeRequests} sheetScreenshotRequests={tasks.sheetScreenshotRequests} docScreenshotRequests={tasks.docScreenshotRequests} slideScreenshotRequests={tasks.slideScreenshotRequests} />
       </div>
       <div className={`dsh-univer-create-product-pane${unitType === 'doc' ? ' is-active' : ''}`} aria-hidden={unitType !== 'doc'}>
-        <DocProductView key={`${props.sessionId}:doc`} {...props} />
+        <DocProductView key={`${props.sessionId}:doc`} {...props} queuedOperations={dispatchOperations} codeRequests={tasks.codeRequests} sheetScreenshotRequests={tasks.sheetScreenshotRequests} docScreenshotRequests={tasks.docScreenshotRequests} slideScreenshotRequests={tasks.slideScreenshotRequests} />
       </div>
       <div className={`dsh-univer-create-product-pane${unitType === 'slide' ? ' is-active' : ''}`} aria-hidden={unitType !== 'slide'}>
-        <SlideProductView key={`${props.sessionId}:slide`} {...props} />
+        <SlideProductView key={`${props.sessionId}:slide`} {...props} queuedOperations={dispatchOperations} codeRequests={tasks.codeRequests} sheetScreenshotRequests={tasks.sheetScreenshotRequests} docScreenshotRequests={tasks.docScreenshotRequests} slideScreenshotRequests={tasks.slideScreenshotRequests} />
       </div>
     </section>
   )

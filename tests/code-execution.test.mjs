@@ -25,13 +25,14 @@ test('browser executor injects only Facade root and controlled console', () => {
   assert.match(client, /FORBIDDEN_UNIVER_CODE/)
   assert.match(client, /__DSH_UNIVER_CODE_DEBUG__/)
   assert.match(client, /debugUniverCode\(sessionId, unitType, request\.id, request\.code\)/)
-  assert.match(client, /'univer-code-requests'/)
+  assert.match(client, /'tasks'/)
+  assert.doesNotMatch(client, /'univer-code-requests'/)
   assert.match(client, /'univer-code-claim'/)
   assert.match(client, /'univer-code-result'/)
 })
 
 test('Doc runtimes register the enhanced table plugin and Facade mixin', () => {
-  assert.equal(manifest.dependencies['@univerjs-pro/docs-table'], '1.0.0-beta.2')
+  assert.equal(manifest.dependencies['@univerjs-pro/docs-table'], '1.0.0-rc.0')
   for (const source of [client, workspaceDocsRuntime]) {
     assert.match(source, /UniverDocsTablePlugin/)
     assert.match(source, /@univerjs-pro\/docs-table\/facade/)
@@ -40,7 +41,7 @@ test('Doc runtimes register the enhanced table plugin and Facade mixin', () => {
 
 test('Sheet runtimes register Chart plugins, Facade mixins, and UI resources', () => {
   for (const dependency of ['@univerjs-pro/engine-chart', '@univerjs-pro/chart-ui', '@univerjs-pro/sheets-chart', '@univerjs-pro/sheets-chart-ui']) {
-    assert.equal(manifest.dependencies[dependency], '1.0.0-beta.2')
+    assert.equal(manifest.dependencies[dependency], '1.0.0-rc.0')
   }
   for (const source of [client, workspaceSheetRuntime]) {
     assert.match(source, /UniverSheetsChartPlugin/)
@@ -58,7 +59,7 @@ test('successful browser code execution persists each supported unit snapshot', 
   assert.match(client, /getActiveDocument\(\)\?\.save\(\)/)
   assert.match(client, /presentation\.save\(\)/)
   assert.match(client, /'save', \{ sessionId, unitType, snapshot \}/)
-  assert.match(client, /useUniverCodeExecutor\(sessionId, 'sheet', hostLoaded/)
-  assert.match(client, /useUniverCodeExecutor\(sessionId, 'doc', hostLoaded/)
-  assert.match(client, /useUniverCodeExecutor\(sessionId, 'slide', hostLoaded/)
+  assert.match(client, /useUniverCodeExecutor\(sessionId, 'sheet', props\.codeRequests, hostLoaded/)
+  assert.match(client, /useUniverCodeExecutor\(sessionId, 'doc', props\.codeRequests, hostLoaded/)
+  assert.match(client, /useUniverCodeExecutor\(sessionId, 'slide', props\.codeRequests, hostLoaded/)
 })
