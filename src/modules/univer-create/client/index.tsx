@@ -56,6 +56,7 @@ import { UniverSlidesUIPlugin } from '@univerjs-pro/slides-ui'
 import SlidesUIEnUS from '@univerjs-pro/slides-ui/locale/en-US'
 import SlidesUIZhCN from '@univerjs-pro/slides-ui/locale/zh-CN'
 import { useDshLanguage } from '../../../dsh-language.js'
+import { UNIVER_CREATE_LOCALES } from './locales.js'
 
 import '@univerjs/preset-docs-core/lib/index.css'
 import '@univerjs/preset-docs-drawing/lib/index.css'
@@ -609,8 +610,8 @@ interface SavePathDialogProps {
   onSave: (path: string) => void
 }
 
-function safeOfficeFilename(title: string, extension: SavePathDialogProps['extension']): string {
-  const stem = title.trim().replace(/[\\/:*?"<>|]+/g, '_') || '未命名文件'
+function safeOfficeFilename(title: string, extension: SavePathDialogProps['extension'], untitled = 'Untitled'): string {
+  const stem = title.trim().replace(/[\\/:*?"<>|]+/g, '_') || untitled
   return `${stem}.${extension}`
 }
 
@@ -622,7 +623,9 @@ function openedFilePath(file: File): string {
 }
 
 function SavePathDialog({ extension, suggestedName, busy, onCancel, onSave }: SavePathDialogProps) {
-  const [path, setPath] = useState(() => safeOfficeFilename(suggestedName, extension))
+  const language = useDshLanguage()
+  const ui = UNIVER_CREATE_LOCALES[language]
+  const [path, setPath] = useState(() => safeOfficeFilename(suggestedName, extension, ui.untitledFile))
   return (
     <div className="dsh-univer-create-save-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget && !busy) onCancel()
@@ -632,16 +635,16 @@ function SavePathDialog({ extension, suggestedName, busy, onCancel, onSave }: Sa
         const value = path.trim()
         if (value.length > 0) onSave(value)
       }}>
-        <h2 id="dsh-univer-save-title">保存到当前 session workspace</h2>
-        <p>可填写 workspace 内的相对路径；默认保存在 workspace 根目录。</p>
+        <h2 id="dsh-univer-save-title">{ui.saveDialogTitle}</h2>
+        <p>{ui.saveDialogDescription}</p>
         <label>
-          文件路径
-          <input autoFocus value={path} disabled={busy} onChange={(event) => setPath(event.target.value)} placeholder={`例如：${safeOfficeFilename(suggestedName, extension)}`} />
+          {ui.filePath}
+          <input autoFocus value={path} disabled={busy} onChange={(event) => setPath(event.target.value)} placeholder={`${ui.example}: ${safeOfficeFilename(suggestedName, extension, ui.untitledFile)}`} />
         </label>
         <div className="dsh-univer-create-save-actions">
-          <button className="dsh-univer-create-action" type="button" disabled={busy} onClick={onCancel}>取消</button>
+          <button className="dsh-univer-create-action" type="button" disabled={busy} onClick={onCancel}>{ui.cancel}</button>
           <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="submit" disabled={busy || path.trim().length === 0}>
-            {busy ? '保存中…' : '保存'}
+            {busy ? ui.saving : ui.save}
           </button>
         </div>
       </form>
@@ -649,12 +652,38 @@ function SavePathDialog({ extension, suggestedName, busy, onCancel, onSave }: Sa
   )
 }
 
-async function loadUnitFilePath(sessionId: string, unitType: UniverUnitType): Promise<string | null> {
+type UnitFileState = { path: string | null; snapshot: unknown | null }
+
+async function loadUnitFileState(sessionId: string, unitType: UniverUnitType): Promise<UnitFileState> {
   const connection = clientConnection.current
   if (connection === null) throw new Error('Host 连接不可用')
-  const result = await connection.rpc.call('/dsh-univer-create', 'file-path', { sessionId, unitType })
+  const result = await connection.rpc.call('/dsh-univer-create', 'file-state', { sessionId, unitType })
   if (!result.ok) throw new Error(result.error.message)
-  return typeof result.value === 'string' ? result.value : null
+  const value = result.value as { path?: unknown; snapshot?: unknown }
+  if (value === null || typeof value !== 'object') throw new Error('Host 返回了无效的文件状态')
+  return {
+    path: typeof value.path === 'string' ? value.path : null,
+    snapshot: value.snapshot ?? null,
+  }
+}
+
+class UniverExportError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'UniverExportError'
+  }
+}
+
+function isWorkspaceFileExistsError(reason: unknown): boolean {
+  return reason instanceof UniverExportError
+    ? reason.code === 'already-exists'
+    : reason instanceof Error && reason.message.includes('目标文件已存在')
+}
+
+const UNKNOWN_FILE_SNAPSHOT = '\u0000unknown-file-snapshot'
+
+function confirmOpenWithUnsavedChanges(snapshot: unknown, baseline: string | null, message: string): boolean {
+  return JSON.stringify(snapshot) === baseline || window.confirm(message)
 }
 
 async function saveUnitFile(
@@ -672,7 +701,7 @@ async function saveUnitFile(
     filePath,
     overwrite,
   })
-  if (!result.ok) throw new Error(result.error.message)
+  if (!result.ok) throw new UniverExportError(result.error.code, result.error.message)
   const value = result.value as { path?: unknown }
   if (typeof value.path !== 'string') throw new Error('Host 未返回保存路径')
   return value.path
@@ -822,11 +851,11 @@ async function importPresentationFromFile(file: File): Promise<ISlideData> {
   return slide as ISlideData
 }
 
-function workbookData(operation?: Extract<SheetOperation, { action: 'new' }>) {
+function workbookData(operation: Extract<SheetOperation, { action: 'new' }> | undefined, defaultTitle: string) {
   const sheetId = 'sheet-1'
   return {
     id: `dsh-univer-${operation?.seq ?? 'default'}`,
-    name: operation?.title ?? '对话表格',
+    name: operation?.title ?? defaultTitle,
     sheetOrder: [sheetId],
     sheets: {
       [sheetId]: {
@@ -839,19 +868,19 @@ function workbookData(operation?: Extract<SheetOperation, { action: 'new' }>) {
   }
 }
 
-function documentData(operation?: Extract<DocOperation, { action: 'new-doc' }>) {
+function documentData(operation: Extract<DocOperation, { action: 'new-doc' }> | undefined, locale: LocaleType, defaultTitle: string) {
   return getDocsEmptySnapshot(
     `dsh-univer-doc-${operation?.seq ?? 'default'}`,
-    LocaleType.ZH_CN,
-    operation?.title ?? '对话文档',
+    locale,
+    operation?.title ?? defaultTitle,
   )
 }
 
-function presentationData(operation?: Extract<SlideOperation, { action: 'new-slide' }>): ISlideData {
+function presentationData(operation: Extract<SlideOperation, { action: 'new-slide' }> | undefined, locale: LocaleType, defaultTitle: string): ISlideData {
   const data = getSlidesEmptySnapshot(
     `dsh-univer-slide-${operation?.seq ?? 'default'}`,
-    LocaleType.ZH_CN,
-    operation?.title ?? '对话演示文稿',
+    locale,
+    operation?.title ?? defaultTitle,
   )
   data.defaultPageSize = {
     ...data.defaultPageSize,
@@ -904,10 +933,10 @@ function textFromBlocks(blocks: readonly unknown[]): string {
   }).filter(Boolean).join(' ')
 }
 
-function conversationLabel(node: ConversationNode): { role: string; text: string } | null {
+function conversationLabel(node: ConversationNode, userLabel: string): { role: string; text: string } | null {
   if (node.kind === 'user' || node.kind === 'steering') {
     const text = textFromBlocks(node.content)
-    return text ? { role: '你', text } : null
+    return text ? { role: userLabel, text } : null
   }
   if (node.kind === 'assistant') {
     const text = textFromBlocks(node.blocks)
@@ -961,6 +990,7 @@ type ResidentRuntimeEntry = {
   savingRef: React.MutableRefObject<boolean>
   pendingSaveRef: React.MutableRefObject<Promise<void> | null>
   lastSavedRef: React.MutableRefObject<string | null>
+  lastFileSnapshotRef: React.MutableRefObject<string | null>
 }
 
 const residentRuntimes = new Map<string, ResidentRuntimeEntry>()
@@ -1005,6 +1035,7 @@ function registerResidentRuntime(
   savingRef: React.MutableRefObject<boolean>,
   pendingSaveRef: React.MutableRefObject<Promise<void> | null>,
   lastSavedRef: React.MutableRefObject<string | null>,
+  lastFileSnapshotRef: React.MutableRefObject<string | null>,
 ): void {
   const key = residentRuntimeKey(sessionId, unitType)
   const previous = residentRuntimes.get(key)
@@ -1015,8 +1046,9 @@ function registerResidentRuntime(
     savingRef.current = previous.savingRef.current
     pendingSaveRef.current = previous.pendingSaveRef.current
     lastSavedRef.current = previous.lastSavedRef.current
+    lastFileSnapshotRef.current = previous.lastFileSnapshotRef.current
   }
-  residentRuntimes.set(key, { sessionId, unitType, runtime, save, savingRef, pendingSaveRef, lastSavedRef })
+  residentRuntimes.set(key, { sessionId, unitType, runtime, save, savingRef, pendingSaveRef, lastSavedRef, lastFileSnapshotRef })
 }
 
 function disposeResidentRuntime(sessionId: string, unitType: UniverUnitType, runtime: ResidentMountedRuntime | null): void {
@@ -1309,19 +1341,21 @@ function SheetProductView(props: ProductViewProps) {
   const { sessionId } = props
   const language = useDshLanguage()
   const locale = univerLocale(language)
+  const ui = UNIVER_CREATE_LOCALES[language]
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedSheetOperation).filter((item): item is SheetOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
-    .map(conversationLabel)
+    .map((node) => conversationLabel(node, ui.user))
     .filter((item): item is { role: string; text: string } => item !== null)
-    .slice(-4), [nodes])
+    .slice(-4), [nodes, ui.user])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'sheet'))
   useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
-  const [title, setTitle] = useState('对话表格')
+  const [title, setTitle] = useState(ui.defaultSheetTitle)
+  useEffect(() => setTitle((current) => current === UNIVER_CREATE_LOCALES.en.defaultSheetTitle || current === UNIVER_CREATE_LOCALES.zh.defaultSheetTitle ? ui.defaultSheetTitle : current), [ui.defaultSheetTitle])
   const [error, setError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -1336,6 +1370,7 @@ function SheetProductView(props: ProductViewProps) {
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
+  const lastFileSnapshotRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const sheetScreenshotInFlightRef = useRef(new Set<string>())
@@ -1359,6 +1394,7 @@ function SheetProductView(props: ProductViewProps) {
     let cancelled = false
     appliedRef.current.clear()
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
     setSaveDialogOpen(false)
@@ -1371,16 +1407,17 @@ function SheetProductView(props: ProductViewProps) {
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFilePath] = await Promise.all([
+      const [result, restoredFileState] = await Promise.all([
         connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'sheet' }),
-        loadUnitFilePath(sessionId, 'sheet'),
+        loadUnitFileState(sessionId, 'sheet'),
       ])
       if (cancelled) return
       if (!result.ok) throw new Error(result.error.message)
       if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
         throw new Error('Host 返回了无效的表格快照')
       }
-      setFilePath(restoredFilePath)
+      setFilePath(restoredFileState.path)
+      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
       if (result.value !== null) {
         setHostSnapshot(result.value)
       } else {
@@ -1413,6 +1450,7 @@ function SheetProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
     }
     if (!hostLoaded) return
@@ -1442,7 +1480,10 @@ function SheetProductView(props: ProductViewProps) {
           UniverSheetsChartUIPlugin,
         ],
       })
-      runtime.univerAPI.createWorkbook(normalizeWorkbookSnapshot(snapshot ?? workbookData(operation)))
+      runtime.univerAPI.createWorkbook(normalizeWorkbookSnapshot(snapshot ?? workbookData(operation, ui.defaultSheetTitle)))
+      if (lastFileSnapshotRef.current === null) {
+        lastFileSnapshotRef.current = JSON.stringify(normalizeWorkbookSnapshot(runtime.univerAPI.getActiveWorkbook()?.save()))
+      }
       const mounted = Object.assign(runtime, { mount })
       runtimeRef.current = mounted
       registerResidentRuntime(
@@ -1453,13 +1494,14 @@ function SheetProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
       openedWorkbookSessions.add(sessionId)
       setSheetVisible(true)
       const snapshotTitle = snapshot !== null && typeof snapshot === 'object' && typeof (snapshot as any).name === 'string'
         ? (snapshot as any).name
         : undefined
-      setTitle(operation?.title ?? snapshotTitle ?? '对话表格')
+      setTitle(operation?.title ?? snapshotTitle ?? ui.defaultSheetTitle)
     }
 
     try {
@@ -1676,8 +1718,7 @@ function SheetProductView(props: ProductViewProps) {
       try {
         savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, chosenPath === undefined)
       } catch (reason) {
-        const message = reason instanceof Error ? reason.message : String(reason)
-        if (chosenPath !== undefined && message.includes('目标文件已存在') && window.confirm(`${targetPath} 已存在，是否覆盖？`)) {
+        if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
           savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, true)
         } else {
           throw reason
@@ -1685,8 +1726,9 @@ function SheetProductView(props: ProductViewProps) {
       }
       setFilePath(savedPath)
       setSaveDialogOpen(false)
-      setSaveNotice(`已保存到 ${savedPath}`)
-      lastSavedRef.current = JSON.stringify(nextSnapshot)
+      setSaveNotice(ui.savedTo(savedPath))
+      lastFileSnapshotRef.current = JSON.stringify(nextSnapshot)
+      lastSavedRef.current = lastFileSnapshotRef.current
     } catch (reason) {
       setError(`保存 XLSX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -1709,7 +1751,13 @@ function SheetProductView(props: ProductViewProps) {
   }
 
   const newWorkbook = async () => {
-    const blankSnapshot = normalizeWorkbookSnapshot(workbookData({ action: 'new', seq: Date.now() }))
+    const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+    if (workbook !== undefined && workbook !== null && !confirmOpenWithUnsavedChanges(
+      normalizeWorkbookSnapshot(workbook.save()),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChangesForNew,
+    )) return
+    const blankSnapshot = normalizeWorkbookSnapshot(workbookData({ action: 'new', seq: Date.now() }, ui.defaultSheetTitle))
     disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
     runtimeRef.current = null
     // A manually created workbook replaces both the persisted workbook and any
@@ -1717,9 +1765,10 @@ function SheetProductView(props: ProductViewProps) {
     appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     openedWorkbookSessions.add(sessionId)
     setError(null)
-    setTitle('对话表格')
+    setTitle(ui.defaultSheetTitle)
     setFilePath(null)
     setSaveNotice('')
     setHostSnapshot(blankSnapshot)
@@ -1742,6 +1791,7 @@ function SheetProductView(props: ProductViewProps) {
       appliedRef.current.clear()
       hydratedFromHostRef.current = true
       lastSavedRef.current = null
+      lastFileSnapshotRef.current = null
       openedWorkbookSessions.add(sessionId)
       setHostSnapshot(importedSnapshot)
       const importedPath = openedFilePath(file)
@@ -1756,13 +1806,23 @@ function SheetProductView(props: ProductViewProps) {
     }
   }
 
+  const openWorkbookFile = () => {
+    const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+    if (workbook !== undefined && workbook !== null && !confirmOpenWithUnsavedChanges(
+      normalizeWorkbookSnapshot(workbook.save()),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChanges,
+    )) return
+    fileInputRef.current?.click()
+  }
+
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => fileInputRef.current?.click()}>
-        {importing ? '打开中…' : '打开'}
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openWorkbookFile}>
+        {importing ? ui.opening : ui.open}
       </button>
       <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={newWorkbook}>
-        新建
+        {ui.create}
       </button>
     </>
   )
@@ -1778,7 +1838,7 @@ function SheetProductView(props: ProductViewProps) {
         <div className="dsh-univer-create-toolbar">
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? `文件：${filePath}` : operations.length > 0 ? `已同步 ${operations.length} 个对话操作` : '新文件，首次保存时可选择 workspace 内路径')}
+            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSheetOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
           <button
@@ -1787,30 +1847,30 @@ function SheetProductView(props: ProductViewProps) {
             disabled={importing || exporting || !hostLoaded}
             onClick={() => void saveAsXlsx()}
           >
-            {exporting ? '保存中…' : '保存'}
+            {exporting ? ui.saving : ui.save}
           </button>
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
       {saveDialogOpen && <SavePathDialog extension="xlsx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsXlsx(path)} />}
       {hostLoaded && !sheetVisible && (
-        <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Sheet">
+        <div className="dsh-univer-create-welcome" aria-label={ui.startSheet}>
           {actionButtons}
         </div>
       )}
       {sheetVisible && (
         <>
-          <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
+          <aside className="dsh-univer-create-chat-overlay" aria-label={ui.chatActivity}>
             <div className="dsh-univer-create-chat-overlay__header">
-              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <div className="dsh-univer-create-chat-overlay__title">{ui.chatActivity}</div>
               <button
                 className="dsh-univer-create-chat-overlay__toggle"
                 type="button"
-                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-label={chatOverlayVisible ? ui.closeChatActivity : ui.openChatActivity}
                 aria-expanded={chatOverlayVisible}
                 onClick={() => setChatOverlayVisible((visible) => !visible)}
               >
-                {chatOverlayVisible ? '隐藏' : '显示'}
+                {chatOverlayVisible ? ui.hide : ui.show}
               </button>
             </div>
             <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
@@ -1824,7 +1884,7 @@ function SheetProductView(props: ProductViewProps) {
           </aside>
         </>
       )}
-      {error !== null && <div className="dsh-univer-create-error" role="alert">表格操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">{ui.sheetError}{error}{!hostLoaded && ui.hostRecoveryHint}</div>}
     </section>
   )
 }
@@ -1901,19 +1961,21 @@ function DocProductView(props: ProductViewProps) {
   const { sessionId } = props
   const language = useDshLanguage()
   const locale = univerLocale(language)
+  const ui = UNIVER_CREATE_LOCALES[language]
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedDocOperation).filter((item): item is DocOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
-    .map(conversationLabel)
+    .map((node) => conversationLabel(node, ui.user))
     .filter((item): item is { role: string; text: string } => item !== null)
-    .slice(-4), [nodes])
+    .slice(-4), [nodes, ui.user])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedRuntime | null>(getResidentRuntime<MountedRuntime>(sessionId, 'doc'))
   useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
-  const [title, setTitle] = useState('对话文档')
+  const [title, setTitle] = useState(ui.defaultDocTitle)
+  useEffect(() => setTitle((current) => current === UNIVER_CREATE_LOCALES.en.defaultDocTitle || current === UNIVER_CREATE_LOCALES.zh.defaultDocTitle ? ui.defaultDocTitle : current), [ui.defaultDocTitle])
   const [error, setError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -1926,6 +1988,7 @@ function DocProductView(props: ProductViewProps) {
   const [hostSnapshot, setHostSnapshot] = useState<unknown>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
+  const lastFileSnapshotRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const queuedPersistingRef = useRef(false)
@@ -1949,6 +2012,7 @@ function DocProductView(props: ProductViewProps) {
     let cancelled = false
     appliedRef.current.clear()
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
     setSaveDialogOpen(false)
@@ -1961,16 +2025,17 @@ function DocProductView(props: ProductViewProps) {
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFilePath] = await Promise.all([
+      const [result, restoredFileState] = await Promise.all([
         connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'doc' }),
-        loadUnitFilePath(sessionId, 'doc'),
+        loadUnitFileState(sessionId, 'doc'),
       ])
       if (cancelled) return
       if (!result.ok) throw new Error(result.error.message)
       if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
         throw new Error('Host 返回了无效的文档快照')
       }
-      setFilePath(restoredFilePath)
+      setFilePath(restoredFileState.path)
+      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
       if (result.value !== null) {
         setHostSnapshot(result.value)
       } else {
@@ -2003,6 +2068,7 @@ function DocProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
     }
     if (!hostLoaded) return
@@ -2029,8 +2095,9 @@ function DocProductView(props: ProductViewProps) {
           UniverDocsTablePlugin,
         ],
       })
-      const fDocument = runtime.univerAPI.createDocument((restoredSnapshot ?? documentData(operation)) as any)
+      const fDocument = runtime.univerAPI.createDocument((restoredSnapshot ?? documentData(operation, locale, ui.defaultDocTitle)) as any)
       if (restoredSnapshot === undefined && operation?.text) fDocument.insertText(0, operation.text)
+      if (lastFileSnapshotRef.current === null) lastFileSnapshotRef.current = JSON.stringify(fDocument.save())
       const mounted = Object.assign(runtime, { mount })
       runtimeRef.current = mounted
       registerResidentRuntime(
@@ -2041,13 +2108,14 @@ function DocProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
       openedDocumentSessions.add(sessionId)
       setDocumentVisible(true)
       const snapshotTitle = restoredSnapshot !== null && typeof restoredSnapshot === 'object' && typeof (restoredSnapshot as any).title === 'string'
         ? (restoredSnapshot as any).title
         : undefined
-      setTitle(operation?.title ?? snapshotTitle ?? '对话文档')
+      setTitle(operation?.title ?? snapshotTitle ?? ui.defaultDocTitle)
     }
 
     try {
@@ -2222,15 +2290,22 @@ function DocProductView(props: ProductViewProps) {
   }
 
   const newDocument = async () => {
-    const blankSnapshot = documentData({ action: 'new-doc', seq: Date.now() })
+    const document = runtimeRef.current?.univerAPI.getActiveDocument()
+    if (document !== undefined && document !== null && !confirmOpenWithUnsavedChanges(
+      document.save(),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChangesForNew,
+    )) return
+    const blankSnapshot = documentData({ action: 'new-doc', seq: Date.now() }, locale, ui.defaultDocTitle)
     disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
     runtimeRef.current = null
     appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     openedDocumentSessions.add(sessionId)
     setError(null)
-    setTitle('对话文档')
+    setTitle(ui.defaultDocTitle)
     setFilePath(null)
     setSaveNotice('')
     setHostSnapshot(blankSnapshot)
@@ -2251,6 +2326,7 @@ function DocProductView(props: ProductViewProps) {
       appliedRef.current.clear()
       hydratedFromHostRef.current = true
       lastSavedRef.current = null
+      lastFileSnapshotRef.current = null
       openedDocumentSessions.add(sessionId)
       setHostSnapshot(importedSnapshot)
       const importedPath = openedFilePath(file)
@@ -2263,6 +2339,16 @@ function DocProductView(props: ProductViewProps) {
     } finally {
       setImporting(false)
     }
+  }
+
+  const openDocumentFile = () => {
+    const document = runtimeRef.current?.univerAPI.getActiveDocument()
+    if (document !== undefined && document !== null && !confirmOpenWithUnsavedChanges(
+      document.save(),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChanges,
+    )) return
+    fileInputRef.current?.click()
   }
 
   const saveAsDocx = async (chosenPath?: string) => {
@@ -2285,8 +2371,7 @@ function DocProductView(props: ProductViewProps) {
       try {
         savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, chosenPath === undefined)
       } catch (reason) {
-        const message = reason instanceof Error ? reason.message : String(reason)
-        if (chosenPath !== undefined && message.includes('目标文件已存在') && window.confirm(`${targetPath} 已存在，是否覆盖？`)) {
+        if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
           savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, true)
         } else {
           throw reason
@@ -2294,8 +2379,9 @@ function DocProductView(props: ProductViewProps) {
       }
       setFilePath(savedPath)
       setSaveDialogOpen(false)
-      setSaveNotice(`已保存到 ${savedPath}`)
-      lastSavedRef.current = JSON.stringify(nextSnapshot)
+      setSaveNotice(ui.savedTo(savedPath))
+      lastFileSnapshotRef.current = JSON.stringify(nextSnapshot)
+      lastSavedRef.current = lastFileSnapshotRef.current
     } catch (reason) {
       setError(`保存 DOCX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -2305,11 +2391,11 @@ function DocProductView(props: ProductViewProps) {
 
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => fileInputRef.current?.click()}>
-        {importing ? '打开中…' : '打开'}
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openDocumentFile}>
+        {importing ? ui.opening : ui.open}
       </button>
       <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={newDocument}>
-        新建
+        {ui.create}
       </button>
     </>
   )
@@ -2325,30 +2411,30 @@ function DocProductView(props: ProductViewProps) {
         <div className="dsh-univer-create-toolbar">
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? `文件：${filePath}` : operations.length > 0 ? `已同步 ${operations.length} 个文档操作` : '新文件，首次保存时可选择 workspace 内路径')}
+            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedDocOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
           <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void saveAsDocx()}>
-            {exporting ? '保存中…' : '保存'}
+            {exporting ? ui.saving : ui.save}
           </button>
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
       {saveDialogOpen && <SavePathDialog extension="docx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsDocx(path)} />}
-      {hostLoaded && !documentVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Doc">{actionButtons}</div>}
+      {hostLoaded && !documentVisible && <div className="dsh-univer-create-welcome" aria-label={ui.startDoc}>{actionButtons}</div>}
       {documentVisible && (
         <>
-          <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
+          <aside className="dsh-univer-create-chat-overlay" aria-label={ui.chatActivity}>
             <div className="dsh-univer-create-chat-overlay__header">
-              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <div className="dsh-univer-create-chat-overlay__title">{ui.chatActivity}</div>
               <button
                 className="dsh-univer-create-chat-overlay__toggle"
                 type="button"
-                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-label={chatOverlayVisible ? ui.closeChatActivity : ui.openChatActivity}
                 aria-expanded={chatOverlayVisible}
                 onClick={() => setChatOverlayVisible((visible) => !visible)}
               >
-                {chatOverlayVisible ? '隐藏' : '显示'}
+                {chatOverlayVisible ? ui.hide : ui.show}
               </button>
             </div>
             <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
@@ -2362,7 +2448,7 @@ function DocProductView(props: ProductViewProps) {
           </aside>
         </>
       )}
-      {error !== null && <div className="dsh-univer-create-error" role="alert">文档操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">{ui.docError}{error}{!hostLoaded && ui.hostRecoveryHint}</div>}
     </section>
   )
 }
@@ -2457,19 +2543,21 @@ function SlideProductView(props: ProductViewProps) {
   const { sessionId } = props
   const language = useDshLanguage()
   const locale = univerLocale(language)
+  const ui = UNIVER_CREATE_LOCALES[language]
   const { nodes, partialText } = useConversationFeed(props)
   const operations = useMemo(() => props.queuedOperations.map(queuedSlideOperation).filter((item): item is SlideOperation => item !== null), [props.queuedOperations])
   const chatLines = useMemo(() => nodes
-    .map(conversationLabel)
+    .map((node) => conversationLabel(node, ui.user))
     .filter((item): item is { role: string; text: string } => item !== null)
-    .slice(-4), [nodes])
+    .slice(-4), [nodes, ui.user])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const runtimeRef = useRef<MountedSlideRuntime | null>(getResidentRuntime<MountedSlideRuntime>(sessionId, 'slide'))
   useEffect(() => runtimeRef.current?.univer.setLocale(locale), [locale])
   const appliedRef = useRef(new Set<SheetOperationId>())
   const chatStreamRef = useRef<HTMLDivElement>(null)
-  const [title, setTitle] = useState('对话演示文稿')
+  const [title, setTitle] = useState(ui.defaultSlideTitle)
+  useEffect(() => setTitle((current) => current === UNIVER_CREATE_LOCALES.en.defaultSlideTitle || current === UNIVER_CREATE_LOCALES.zh.defaultSlideTitle ? ui.defaultSlideTitle : current), [ui.defaultSlideTitle])
   const [error, setError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -2482,6 +2570,7 @@ function SlideProductView(props: ProductViewProps) {
   const [hostSnapshot, setHostSnapshot] = useState<ISlideData | null>(null)
   const hydratedFromHostRef = useRef(false)
   const lastSavedRef = useRef<string | null>(null)
+  const lastFileSnapshotRef = useRef<string | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef<Promise<void> | null>(null)
   const queuedPersistingRef = useRef(false)
@@ -2526,6 +2615,7 @@ function SlideProductView(props: ProductViewProps) {
     let cancelled = false
     appliedRef.current.clear()
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
     setSaveDialogOpen(false)
@@ -2538,16 +2628,17 @@ function SlideProductView(props: ProductViewProps) {
     const restore = async () => {
       const connection = clientConnection.current
       if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFilePath] = await Promise.all([
+      const [result, restoredFileState] = await Promise.all([
         connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'slide' }),
-        loadUnitFilePath(sessionId, 'slide'),
+        loadUnitFileState(sessionId, 'slide'),
       ])
       if (cancelled) return
       if (!result.ok) throw new Error(result.error.message)
       if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
         throw new Error('Host 返回了无效的演示文稿快照')
       }
-      setFilePath(restoredFilePath)
+      setFilePath(restoredFileState.path)
+      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
       if (result.value !== null) {
         setHostSnapshot(result.value as ISlideData)
       } else {
@@ -2580,6 +2671,7 @@ function SlideProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
     }
     if (!hostLoaded) return
@@ -2612,7 +2704,8 @@ function SlideProductView(props: ProductViewProps) {
       univer.registerPlugin(UniverSlidesChartUIPlugin)
 
       const univerAPI = FUniver.newAPI(univer)
-      const presentation = univerAPI.createPresentation(normalizeAiSlideLayouts(restoredSnapshot ?? presentationData(operation)))
+      const presentation = univerAPI.createPresentation(normalizeAiSlideLayouts(restoredSnapshot ?? presentationData(operation, locale, ui.defaultSlideTitle)))
+      if (lastFileSnapshotRef.current === null) lastFileSnapshotRef.current = JSON.stringify(presentation.save())
       const mounted = { univer, univerAPI, mount, presentation }
       runtimeRef.current = mounted
       registerResidentRuntime(
@@ -2623,10 +2716,11 @@ function SlideProductView(props: ProductViewProps) {
         savingRef,
         pendingSaveRef,
         lastSavedRef,
+        lastFileSnapshotRef,
       )
       openedPresentationSessions.add(sessionId)
       setPresentationVisible(true)
-      setTitle(operation?.title ?? restoredSnapshot?.name ?? '对话演示文稿')
+      setTitle(operation?.title ?? restoredSnapshot?.name ?? ui.defaultSlideTitle)
 
       // Slides UI mounts the main render scene and each page thumbnail scene
       // asynchronously. Re-measure after both React and drawing resources settle,
@@ -2912,6 +3006,7 @@ function SlideProductView(props: ProductViewProps) {
     appliedRef.current.clear()
     hydratedFromHostRef.current = true
     lastSavedRef.current = null
+    lastFileSnapshotRef.current = null
     openedPresentationSessions.add(sessionId)
     setError(null)
     setTitle(nextTitle)
@@ -2922,9 +3017,15 @@ function SlideProductView(props: ProductViewProps) {
   }
 
   const newPresentation = async () => {
-    const blankSnapshot = presentationData({ action: 'new-slide', seq: Date.now() })
+    const presentation = runtimeRef.current?.presentation
+    if (presentation !== undefined && !confirmOpenWithUnsavedChanges(
+      presentation.save(),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChangesForNew,
+    )) return
+    const blankSnapshot = presentationData({ action: 'new-slide', seq: Date.now() }, locale, ui.defaultSlideTitle)
     try {
-      await replacePresentation(blankSnapshot, '对话演示文稿', null)
+      await replacePresentation(blankSnapshot, ui.defaultSlideTitle, null)
     } catch (reason) {
       setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     }
@@ -2941,6 +3042,16 @@ function SlideProductView(props: ProductViewProps) {
     } finally {
       setImporting(false)
     }
+  }
+
+  const openPresentationFile = () => {
+    const presentation = runtimeRef.current?.presentation
+    if (presentation !== undefined && !confirmOpenWithUnsavedChanges(
+      presentation.save(),
+      lastFileSnapshotRef.current,
+      ui.confirmDiscardChanges,
+    )) return
+    fileInputRef.current?.click()
   }
 
   const saveAsPptx = async (chosenPath?: string) => {
@@ -2963,8 +3074,7 @@ function SlideProductView(props: ProductViewProps) {
       try {
         savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, chosenPath === undefined)
       } catch (reason) {
-        const message = reason instanceof Error ? reason.message : String(reason)
-        if (chosenPath !== undefined && message.includes('目标文件已存在') && window.confirm(`${targetPath} 已存在，是否覆盖？`)) {
+        if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
           savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, true)
         } else {
           throw reason
@@ -2972,8 +3082,9 @@ function SlideProductView(props: ProductViewProps) {
       }
       setFilePath(savedPath)
       setSaveDialogOpen(false)
-      setSaveNotice(`已保存到 ${savedPath}`)
-      lastSavedRef.current = JSON.stringify(nextSnapshot)
+      setSaveNotice(ui.savedTo(savedPath))
+      lastFileSnapshotRef.current = JSON.stringify(nextSnapshot)
+      lastSavedRef.current = lastFileSnapshotRef.current
     } catch (reason) {
       setError(`保存 PPTX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -2983,11 +3094,11 @@ function SlideProductView(props: ProductViewProps) {
 
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => fileInputRef.current?.click()}>
-        {importing ? '打开中…' : '打开'}
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openPresentationFile}>
+        {importing ? ui.opening : ui.open}
       </button>
       <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void newPresentation()}>
-        新建
+        {ui.create}
       </button>
     </>
   )
@@ -3003,28 +3114,28 @@ function SlideProductView(props: ProductViewProps) {
         <div className="dsh-univer-create-toolbar">
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? `文件：${filePath}` : operations.length > 0 ? `已同步 ${operations.length} 个幻灯片操作` : '新文件，首次保存时可选择 workspace 内路径')}
+            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSlideOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
           <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void saveAsPptx()}>
-            {exporting ? '保存中…' : '保存'}
+            {exporting ? ui.saving : ui.save}
           </button>
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container dsh-univer-create-container--slides" />
        
       {presentationVisible && (
-         <aside className="dsh-univer-create-chat-overlay" aria-label="当前会话动态">
+         <aside className="dsh-univer-create-chat-overlay" aria-label={ui.chatActivity}>
            <div className="dsh-univer-create-chat-overlay__header">
-              <div className="dsh-univer-create-chat-overlay__title">对话动态</div>
+              <div className="dsh-univer-create-chat-overlay__title">{ui.chatActivity}</div>
               <button
                 className="dsh-univer-create-chat-overlay__toggle"
                 type="button"
-                aria-label={chatOverlayVisible ? '关闭对话动态' : '打开对话动态'}
+                aria-label={chatOverlayVisible ? ui.closeChatActivity : ui.openChatActivity}
                 aria-expanded={chatOverlayVisible}
                 onClick={() => setChatOverlayVisible((visible) => !visible)}
               >
-                {chatOverlayVisible ? '隐藏' : '显示'}
+                {chatOverlayVisible ? ui.hide : ui.show}
               </button>
             </div>
            <div ref={chatStreamRef} className="dsh-univer-create-chat-overlay__stream" hidden={!chatOverlayVisible}>
@@ -3038,8 +3149,8 @@ function SlideProductView(props: ProductViewProps) {
          </aside>
        )}
        {saveDialogOpen && <SavePathDialog extension="pptx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsPptx(path)} />}
-      {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label="开始使用 Univer Slide">{actionButtons}</div>}
-      {error !== null && <div className="dsh-univer-create-error" role="alert">幻灯片操作失败：{error}{!hostLoaded && '。请在 Host 服务恢复后刷新页面重试。'}</div>}
+      {hostLoaded && !presentationVisible && <div className="dsh-univer-create-welcome" aria-label={ui.startSlide}>{actionButtons}</div>}
+      {error !== null && <div className="dsh-univer-create-error" role="alert">{ui.slideError}{error}{!hostLoaded && ui.hostRecoveryHint}</div>}
     </section>
   )
 }
@@ -3047,6 +3158,8 @@ function SlideProductView(props: ProductViewProps) {
 const selectedUnitBySession = new Map<string, UniverUnitType>()
 
 function UniverView(props: ConvViewProps) {
+  const language = useDshLanguage()
+  const ui = UNIVER_CREATE_LOCALES[language]
   const { nodes } = useConversationFeed(props)
   const sessionRunning = props.useSession((session) => session.running)
   const shellRef = useRef<HTMLElement>(null)
@@ -3184,8 +3297,8 @@ function UniverView(props: ConvViewProps) {
   }
 
   return (
-    <section ref={shellRef} className="dsh-univer-create-shell" aria-label="Univer Sheet、Doc 与 Slide">
-      <nav className="dsh-univer-create-product-bar" aria-label="选择 Univer 编辑器">
+    <section ref={shellRef} className="dsh-univer-create-shell" aria-label={ui.shellLabel}>
+      <nav className="dsh-univer-create-product-bar" aria-label={ui.selectEditor}>
         <button className={`dsh-univer-create-product-tab${unitType === 'sheet' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'sheet'} onClick={() => selectUnit('sheet')}>Sheet</button>
         <button className={`dsh-univer-create-product-tab${unitType === 'doc' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'doc'} onClick={() => selectUnit('doc')}>Doc</button>
         <button className={`dsh-univer-create-product-tab${unitType === 'slide' ? ' is-active' : ''}`} type="button" aria-pressed={unitType === 'slide'} onClick={() => selectUnit('slide')}>Slide</button>

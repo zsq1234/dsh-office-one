@@ -29,6 +29,7 @@ const workbookRowSchema = z.object({
   snapshot: z.unknown(),
   updatedAt: z.number(),
   filePath: z.string().nullable().optional(),
+  fileSnapshot: z.unknown().optional(),
   queuedOperations: z.array(queuedOperationSchema).optional(),
   queuedSheetOperations: z.array(queuedSheetOperationSchema).optional(),
   revision: z.number().int().optional(),
@@ -375,11 +376,20 @@ async function exportOfficeFile(data: unknown, unitType: keyof typeof FILE_FORMA
   return output
 }
 
+class WorkspaceFileExistsError extends Error {
+  readonly code = 'already-exists'
+
+  constructor() {
+    super('目标文件已存在')
+    this.name = 'WorkspaceFileExistsError'
+  }
+}
+
 async function saveExportedFile(root: string, filePath: string, unitType: keyof typeof FILE_FORMATS, data: unknown, overwrite: boolean): Promise<{ path: string; size: number }> {
   const target = await workspaceTarget(root, filePath, FILE_FORMATS[unitType])
   const existing = await lstat(target).catch((reason: NodeJS.ErrnoException) => reason.code === 'ENOENT' ? null : Promise.reject(reason))
   if (existing !== null && !existing.isFile()) throw new Error('目标路径不是普通文件')
-  if (existing !== null && !overwrite) throw new Error('目标文件已存在')
+  if (existing !== null && !overwrite) throw new WorkspaceFileExistsError()
   const output = await exportOfficeFile(data, unitType)
   const temporary = resolve(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`)
   try {
@@ -484,6 +494,7 @@ export function apply(ctx: Context): void {
         snapshot: row?.snapshot ?? null,
         updatedAt: row?.updatedAt ?? Date.now(),
         filePath: row?.filePath ?? null,
+        fileSnapshot: row?.fileSnapshot,
         queuedOperations: normalizedSheet,
         queuedSheetOperations: row?.queuedSheetOperations,
         revision: row?.revision,
@@ -498,6 +509,7 @@ export function apply(ctx: Context): void {
         snapshot: row?.snapshot ?? null,
         updatedAt: row?.updatedAt ?? Date.now(),
         filePath: row?.filePath ?? null,
+        fileSnapshot: row?.fileSnapshot,
         queuedOperations: mergeUnique((row?.queuedOperations ?? []).filter((item) => item.unitType === unitType), incoming),
         queuedSheetOperations: row?.queuedSheetOperations,
         revision: row?.revision,
@@ -544,6 +556,7 @@ export function apply(ctx: Context): void {
           snapshot: row?.snapshot ?? null,
           updatedAt: row?.updatedAt ?? now,
           filePath: row?.filePath ?? null,
+          fileSnapshot: row?.fileSnapshot,
           queuedOperations: next,
           queuedSheetOperations: row?.queuedSheetOperations,
           revision: row?.revision,
@@ -584,6 +597,7 @@ export function apply(ctx: Context): void {
           snapshot: row?.snapshot ?? null,
           updatedAt: Date.now(),
           filePath: row?.filePath ?? null,
+          fileSnapshot: row?.fileSnapshot,
           queuedOperations: [...pending, queued],
           // Mirror Sheet writes for older browser clients during migration.
           queuedSheetOperations: unitType === 'sheet'
@@ -707,6 +721,10 @@ export function apply(ctx: Context): void {
       }
       if (endpoint === 'file-path') {
         return { ok: true, value: table.get(storageKey)?.filePath ?? null }
+      }
+      if (endpoint === 'file-state') {
+        const row = table.get(storageKey)
+        return { ok: true, value: { path: row?.filePath ?? null, snapshot: row?.fileSnapshot ?? null } }
       }
       if (endpoint === 'operations' || endpoint === 'tasks') {
         if (typeof request.clientId !== 'string' || request.clientId.length === 0) {
@@ -915,6 +933,7 @@ export function apply(ctx: Context): void {
               snapshot: request.snapshot,
               updatedAt: Date.now(),
               filePath: clearsFilePath ? null : row?.filePath ?? null,
+              fileSnapshot: clearsFilePath ? request.snapshot : row?.fileSnapshot,
               queuedOperations: pending.filter((item) => !committed.has(item.id)),
               queuedSheetOperations: unitType === 'sheet'
                 ? (row?.queuedSheetOperations ?? []).filter((item) => !committed.has(item.id))
@@ -940,6 +959,7 @@ export function apply(ctx: Context): void {
               snapshot: row?.snapshot ?? null,
               updatedAt: Date.now(),
               filePath: row?.filePath ?? null,
+              fileSnapshot: row?.fileSnapshot,
               queuedOperations: (row?.queuedOperations ?? []).filter((item) => !acknowledged.has(item.id)),
               queuedSheetOperations: targetUnit === 'sheet'
                 ? (row?.queuedSheetOperations ?? []).filter((item) => !acknowledged.has(item.id))
@@ -963,6 +983,9 @@ export function apply(ctx: Context): void {
             snapshot: request.snapshot,
             updatedAt: Date.now(),
             filePath: nextFilePath,
+            fileSnapshot: request.filePath === null || typeof request.filePath === 'string'
+              ? request.snapshot
+              : previous?.fileSnapshot,
             queuedOperations: previous?.queuedOperations,
             queuedSheetOperations: previous?.queuedSheetOperations,
             revision,
@@ -979,7 +1002,19 @@ export function apply(ctx: Context): void {
         }
         const root = services.workspaceRegistry.host.sessionPath(sessionId)
         if (typeof root !== 'string' || root.length === 0) throw new Error('无法解析当前 session workspace 目录')
-        const saved = await saveExportedFile(root, request.filePath, unitType, request.snapshot, request.overwrite === true)
+        let saved: Awaited<ReturnType<typeof saveExportedFile>>
+        try {
+          saved = await saveExportedFile(root, request.filePath, unitType, request.snapshot, request.overwrite === true)
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code: error instanceof WorkspaceFileExistsError ? error.code : 'export-failed',
+              message: error instanceof Error ? error.message : String(error),
+              details: { filePath: request.filePath },
+            },
+          } as any
+        }
         let revision = 0
         await updateWorkbookRow(storageKey, (previous) => {
           const changed = !snapshotsEqual(previous?.snapshot, request.snapshot)
@@ -988,6 +1023,7 @@ export function apply(ctx: Context): void {
             snapshot: request.snapshot,
             updatedAt: Date.now(),
             filePath: saved.path,
+            fileSnapshot: request.snapshot,
             queuedOperations: previous?.queuedOperations,
             queuedSheetOperations: previous?.queuedSheetOperations,
             revision,

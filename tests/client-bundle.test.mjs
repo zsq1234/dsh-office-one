@@ -76,3 +76,15 @@ test('Univer follows DSH zh/en language and falls back to English', async () => 
     assert.ok(code.includes('zhCN'))
   }
 })
+
+test('Univer Tab custom chrome ships matching English and Chinese packs', async () => {
+  const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const text of [
+    'Save to the current session workspace',
+    '保存到当前 session workspace',
+    'Conversation activity',
+    '对话动态',
+    'New file. Choose a workspace path when saving for the first time.',
+    '新文件，首次保存时可选择 workspace 内路径',
+  ]) assert.ok(client.includes(text), `missing translated Univer Tab copy: ${text}`)
+})
