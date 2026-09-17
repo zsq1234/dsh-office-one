@@ -31,27 +31,32 @@ function mountRestore(product, options = {}) {
           if (options.reject) throw new Error('offline')
           return options.load ?? { ok: true, value: { id: 'persisted', body: 'manual edit' } }
         }
-        if (method === 'file-path') return options.filePath ?? { ok: true, value: 'saved.office' }
+        if (method === 'file-state') return options.fileState ?? { ok: true, value: { path: 'saved.office', snapshot: { id: 'persisted', body: 'saved content' } } }
         throw new Error(`Unexpected RPC: ${method}`)
       },
     },
   }
   const clientConnection = { current: connection }
   // Exercise the production metadata loader as well, including RPC errors.
-  const helperStart = source.indexOf('async function loadUnitFilePath(')
+  const helperStart = source.indexOf('async function loadUnitFileState(')
   const helperBodyStart = source.indexOf('{', helperStart)
   const helperEnd = source.indexOf('\n}', helperBodyStart)
-  const loadUnitFilePath = new Function('clientConnection', `return async function(sessionId, unitType) ${source.slice(helperBodyStart, helperEnd + 2)}`)(clientConnection)
+  const helperBody = source.slice(helperBodyStart, helperEnd + 2)
+    .replace(' as { path?: unknown; snapshot?: unknown }', '')
+  const loadUnitFileState = new Function('clientConnection', `return async function(sessionId, unitType) ${helperBody}`)(clientConnection)
+  const lastFileSnapshotRef = { current: 'old-file' }
   const env = {
     sessionId: 'session',
     runtimeRef: { current: null },
     appliedRef: { current: new Set([123]) },
     lastSavedRef: { current: 'old' },
+    lastFileSnapshotRef,
     hydratedFromHostRef: { current: true },
     [markerName]: markers,
     clientConnection,
     props: { onRuntimePresenceChange: () => {} },
-    loadUnitFilePath,
+    loadUnitFileState,
+    UNKNOWN_FILE_SNAPSHOT: '\u0000unknown-file-snapshot',
     setHostLoaded: (value) => { state.loaded = value },
     setHostSnapshot: (value) => { state.snapshot = value },
     setFilePath: (value) => { state.filePath = value },
@@ -61,22 +66,31 @@ function mountRestore(product, options = {}) {
     setError: (value) => { state.error = value },
   }
   const cleanup = new Function(...Object.keys(env), effect)(...Object.values(env))
-  return { state, calls, markers, cleanup, unitType }
+  return { state, calls, markers, cleanup, unitType, lastFileSnapshotRef }
 }
 
 for (const product of products) {
   const [unitType] = product
   test(`${unitType}: fresh page loads persisted snapshot without an opened marker`, async () => {
-    const { state, calls, markers } = mountRestore(product)
+    const { state, calls, markers, lastFileSnapshotRef } = mountRestore(product)
     assert.equal(state.loaded, false, 'replay blocked until restore finishes')
     assert.equal(markers.size, 0)
     await settle()
     assert.deepEqual(state.snapshot, { id: 'persisted', body: 'manual edit' })
     assert.equal(state.filePath, 'saved.office')
+    assert.equal(lastFileSnapshotRef.current, JSON.stringify({ id: 'persisted', body: 'saved content' }))
     assert.equal(state.loaded, true)
     assert.equal(state.error, null)
-    assert.deepEqual(calls.map(({ method }) => method), ['load', 'file-path'])
+    assert.deepEqual(calls.map(({ method }) => method), ['load', 'file-state'])
     for (const call of calls) assert.deepEqual(call.args, { sessionId: 'session', unitType })
+  })
+
+  test(`${unitType}: legacy restored data without a file baseline remains dirty`, async () => {
+    const { lastFileSnapshotRef } = mountRestore(product, {
+      fileState: { ok: true, value: { path: null, snapshot: null } },
+    })
+    await settle()
+    assert.equal(lastFileSnapshotRef.current, '\u0000unknown-file-snapshot')
   })
 
   test(`${unitType}: successful null permits welcome and clears stale marker`, async () => {
@@ -93,7 +107,7 @@ for (const product of products) {
     ['load RPC error', { load: { ok: false, error: { message: 'storage failed' } } }],
     ['rejected RPC', { reject: true }],
     ['missing connection', { disconnected: true }],
-    ['file-path RPC error', { filePath: { ok: false, error: { message: 'metadata failed' } } }],
+    ['file-state RPC error', { fileState: { ok: false, error: { message: 'metadata failed' } } }],
     ['undefined snapshot', { load: { ok: true, value: undefined } }],
     ['array snapshot', { load: { ok: true, value: [] } }],
   ]) {

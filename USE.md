@@ -1,310 +1,116 @@
 # dsh-office-one 使用指南
 
-## 这是什么
+`dsh-office-one` 是面向 DSH Web 的 Office 插件，可在会话中创建、编辑、导入和导出表格、文档及演示文稿，也可以直接编辑 workspace 中已有的 Office 文件。
 
-`dsh-office-one` 是面向 DSH Web 的一体化 Office 插件，集中提供以下三组能力：
+## 支持的文件
 
-1. **对话内 Univer 编辑器**
-   - 在当前会话中创建和编辑 Sheet、Doc、Slide。
-   - 用户可以手动操作编辑器，也可以让 AI 通过插件工具读取或修改内容。
-   - 编辑状态按会话保存；可将结果写入当前 session workspace。
-
-2. **Office 文件导入与导出**
-   - 使用 Univer Exchange Node 在 Office 文件和 Univer 数据之间转换。
-   - 支持表格、文档和演示文稿的导入、编辑与导出。
-   - 转换服务随插件自动启动，默认监听 `127.0.0.1:8787`。
-
-3. **Workspace Office 文件编辑**
-   - 复用 DSH 自带的 Workspace 文件列表和文档预览。
-   - 使用 Univer 打开和编辑 workspace 中的 Excel、Word、PowerPoint 文件。
-   - 不再额外注册独立的「Workspace 文件」对话 Tab。
-
-插件包含一个 Host 插件、一个 Web Client 插件和一个 Bundle 配置层，在一个入口内组合对话编辑、文件转换与 Workspace Office 文件预览能力。
-
-## 适用场景
-
-- 让 AI 创建数据表、报告或演示文稿。
-- 在对话过程中手动调整 AI 生成的 Office 内容。
-- 打开并修改项目 workspace 中已有的 Office 文件。
-- 将对话中生成的内容保存为 `.xlsx`、`.docx` 或 `.pptx`。
-- 通过 DSH 自带的文件预览查看 workspace 的代码、文本和 Office 文件。
+| 类型 | 可打开 | 可保存 |
+| --- | --- | --- |
+| Sheet | `.xls`、`.xlsx`、`.csv` | `.xlsx`、`.csv`；`.xls` 另存为 `.xlsx` |
+| Doc | `.doc`、`.docx` | `.docx` |
+| Slide | `.ppt`、`.pptx` | `.pptx` |
 
 ## 使用入口
 
-打开 DSH Web 页面并进入一个绑定了 workspace 的会话：
+打开 DSH Web，并进入一个已绑定 workspace 的会话：
 
 - 在会话的 **Univer** 视图中创建和编辑 Sheet、Doc、Slide。
-- 在 DSH 自带的右侧 **Workspace 文件列表** 中浏览文件；点击 Office 文件后，会在内置文档预览中打开 `Office (Univer)` 渲染器。
+- 在右侧 **Workspace 文件列表** 中点击 Office 文件，使用 `Office (Univer)` 预览器打开和编辑。
 
-## 使用 Univer 编辑器
+## 在 Univer 中编辑
 
-进入会话中的 **Univer** 视图后，可以在顶部切换：
+进入 **Univer** 视图后，可在顶部切换 `Sheet`、`Doc` 和 `Slide`。你可以手动编辑，也可以直接告诉 AI 要创建或修改什么。
 
-- `Sheet`
-- `Doc`
-- `Slide`
+### Sheet
 
-每种产品都支持两种使用方式：
+支持新建工作簿、导入 `.xlsx` 文件，以及保存为 `.xlsx`。
 
-1. 用户在 Univer 界面中手动编辑。
-2. 在对话中告诉 AI 要创建或修改什么，由 AI 调用插件工具操作当前文档。
-
-插件只暴露 11 个核心工具：三个产品的创建工具、Host 侧读取工具、Doc/Slide 截图工具，以及 Facade API 查询和代码执行器。创建操作使用会话级持久化队列，常规编辑统一通过 `univer_execute_code` 完成。浏览器仅通过一个会话级 `tasks` 轮询获取创建操作、Facade 代码请求和 Doc/Slide 截图请求；各产品页不再分别轮询，Slide 活动状态也随该请求上报。工具结果中的状态含义如下：
-
-- `queued`：操作已经可靠进入队列，等待浏览器编辑器应用。
-- `applied`：读取或代码操作基于已经提交的快照完成。
-- `rendered`：截图等视觉操作已经由可见编辑器完成实际渲染。
-
-Host 侧读取不要求源产品页保持打开；截图和 `univer_execute_code` 依赖真实浏览器 Runtime，执行时界面会切换到目标产品。若创建操作仍在排队，后续读取会等待队列提交，而不会把旧快照标记为 `applied` 返回。
-
-### 使用 Sheet
-
-可以点击：
-
-- **新建**：创建空工作簿。
-- **打开**：从本机选择 `.xlsx` 文件并导入。
-- **保存**：保存为 `.xlsx` 到当前 session workspace。
-
-第一次保存时需要填写 workspace 内的相对路径，例如：
-
-```text
-reports/sales-report.xlsx
-```
-
-目标目录必须已经存在，且路径不能离开当前 session workspace。
-
-可以直接对 AI 说：
+示例：
 
 ```text
 创建一个销售统计表，包含产品、1 月销量、2 月销量和合计列，写入三条示例数据，并把表头设置为蓝色粗体。
 ```
 
 ```text
-读取当前表格 Sheet1 的 A1:D20，计算合计并把结果写到 D 列。
+读取 Sheet1 的 A1:D20，计算合计并把结果写到 D 列。
+```
+
+### Doc
+
+支持新建文档、导入 `.docx` 文件，以及保存为 `.docx`。
+
+示例：
+
+```text
+创建一份项目周报，包含本周进展、风险和下周计划。
 ```
 
 ```text
-新建一个名为“汇总”的工作表，把当前数据整理成月度汇总。
+读取当前文档，在末尾追加一个“待确认事项”章节。
 ```
 
-Sheet 保留四个核心工具：
+### Slide
 
-- `univer_sheet_new`：新建或重置工作簿。
-- `univer_sheet_list`：从已提交快照列出工作表。
-- `univer_sheet_get_range`：按 A1 地址读取数据。
-- `univer_sheet_screenshot`：截取真实工作表 Canvas；支持 `up/down/left/right/top/bottom/start/end` 滚动，AI 可连续截图检查大表的排版、格式和数据区域。
+支持新建演示文稿、导入 `.ppt` 或 `.pptx` 文件，以及保存为 `.pptx`。
 
-新增、删除或重命名工作表，以及写入、清空、格式化区域等编辑操作，统一由 `univer_execute_code` 调用 `FWorkbook`、`FWorksheet` 和 `FRange` Facade 完成。
-
-### 使用 Doc
-
-可以点击：
-
-- **新建**：创建空文档。
-- **打开**：从本机选择 `.docx` 文件并导入。
-- **保存**：保存为 `.docx` 到当前 session workspace。
-
-示例对话：
-
-```text
-创建一份项目周报，包含本周进展、风险、下周计划三个部分。
-```
-
-```text
-读取当前文档内容，在末尾追加一个“待确认事项”章节。
-```
-
-```text
-把当前文档前 20 个字符设置为粗体，字号改成 18。
-```
-
-Doc 保留三个核心工具：
-
-- `univer_doc_new`：新建或重置文档。
-- `univer_doc_get_text`：从已提交快照读取纯文本。
-- `univer_doc_screenshot`：截取真实 Univer Canvas，用于检查标题层级、间距、裁切、对齐和页面留白。支持 `scroll: none | up | down | top | bottom` 和可选 `amount`，AI 可以反复向下滚动并截图，直到返回 `atBottom: true`。
-
-替换、插入、追加、删除和格式化文本统一由 `univer_execute_code` 调用 `FDocument`、`FTextRange` 完成。代码执行器也可通过 Docs Table Facade 使用 `insertTable`、`insertTableFromData`、`getTables`、`findTableByText`。
-
-字符范围采用零起始、左闭右开形式。例如 `start=0, end=5` 表示前 5 个字符。
-
-### 使用 Slide
-
-可以点击：
-
-- **新建**：创建空演示文稿。
-- **打开**：从本机选择 `.ppt` 或 `.pptx` 文件并导入。
-- **保存**：保存为 `.pptx` 到当前 session workspace。
-
-示例对话：
+示例：
 
 ```text
 创建一份 3 页的产品介绍演示文稿，分别是封面、核心功能和下一步计划。
 ```
 
 ```text
-列出当前演示文稿的所有幻灯片和元素，然后修改第 2 页的标题。
+列出所有幻灯片和元素，然后修改第 2 页的标题。
 ```
 
-```text
-在第 1 页坐标 left=120、top=100 的位置添加标题“季度总结”，字号 36，加粗。
-```
+## 编辑 workspace 中的文件
 
-Slide 保留三个核心工具：
+在右侧 **Workspace 文件列表** 中点击 Office 文件，即可在预览区域中编辑。点击 **保存** 后：
 
-- `univer_slide_new`：新建或重置演示文稿；AI 新建的页面默认使用空白版式。
-- `univer_slide_list`：从已提交快照列出页面、元素、位置、尺寸和主要文字样式。
-- `univer_slide_screenshot`：将指定页面的真实渲染画布截成 PNG。
-
-添加或删除幻灯片，以及新增、修改、删除文本和形状等编辑操作，统一由 `univer_execute_code` 调用 Slide 和 Shape Facade 完成。
-
-更新或删除元素前，应先让 AI 列出当前幻灯片，取得正确的元素 ID。完成一页或一轮排版后，可让 AI 调用 `univer_slide_screenshot` 做视觉自检，再根据截图继续调整。
-
-截图由浏览器中的 Slide 页面执行，因此调用截图工具时必须保持当前会话的 **Univer → Slide** 页签打开；如果页面未挂载或 15 秒内没有返回渲染结果，工具会明确报错。默认 `mode=slide` 只读取 Univer 画布，不包含工具栏和对话浮层。
-
-### 使用 Facade API 参考与 JavaScript 执行器
-
-除创建、Host 侧读取和截图外，Sheet、Doc、Slide 的常规编辑统一使用以下两个工具：
-
-- `univer_api_reference`：查询与插件匹配的 Univer Facade API。推荐先用 `action=find` 和关键词发现 API，再用 `action=show` 查看准确签名、示例、空值约束和相关类型。
-- `univer_execute_code`：在当前会话的浏览器页面执行 JavaScript。执行环境只注入 `univerAPI`（`FUniver` Facade）和受控 `console`；代码应通过 `univerAPI.getActiveWorkbook()`、`getActiveDocument()` 或 `getActivePresentation()` 获取当前对象。
-
-推荐对 AI 这样描述：
-
-```text
-先查询 FRange.setValues 和 FRange.setBackground 的 Facade API，再在当前 Sheet 中用 JavaScript 批量生成 100 行数据并设置表头格式。只使用 univerAPI，最后 return 一个结果摘要。
-```
-
-执行器支持普通 JavaScript、循环和 `await`，代码中的 `return` 值及 `console` 输出会返回给 AI。不要写 TypeScript 类型、`import`、DOM 操作、网络请求、浏览器存储访问、Univer injector/model 或其他内部 API。枚举优先从 `univerAPI.Enum` 获取。
-
-Sheet 运行时已注册完整的 Chart 模型、渲染/UI 插件与 Facade mixin。代码执行器和 Workspace 表格编辑器均可使用 `FWorksheet.newChart()`、`insertChart()`、`getChart()`、`getCharts()`，以及图表 builder、实时 `FChart` 操作和 `exportImage()`。Slide 运行时也已注册 Chart 模型、渲染/UI 插件、中文语言包与 Facade mixin；工具栏的 Chart 菜单可打开插入面板，也可通过 `FSlide.newChart()`、`insertChart()`、`getChart()` 和 `getCharts()` 创建及操作幻灯片图表。图表类型和数据方向可从 `univerAPI.Enum.ChartTypeString`、`ChartSourceOrientation` 等枚举获取；调用前仍应先用 `univer_api_reference` 查询具体签名。
-
-代码执行完成后，插件会立即保存当前 Univer 快照。目标 Sheet、Doc 或 Slide 必须已经创建，并保持当前会话的 **Univer** 页签打开；收到执行请求时界面会自动切换到目标产品。
-
-需要检查 AI 实际生成的代码时，可以在浏览器开发者工具 Console 中开启调试：
-
-```js
-window.__DSH_UNIVER_CODE_DEBUG__ = true
-```
-
-之后每次已领取的 `univer_execute_code` 请求都会以 `[dsh-univer]` 分组打印目标类型、请求 ID 和完整代码，包括随后被静态规则拒绝的代码。关闭调试：
-
-```js
-window.__DSH_UNIVER_CODE_DEBUG__ = false
-```
-
-调试开关只保存在当前页面的 JavaScript 生命周期中，刷新页面后需要重新设置；代码可能包含敏感业务数据，不建议在共享屏幕或生产环境长期打开。
-
-`univer_execute_code` 会执行模型生成的同页面代码，并遵循当前会话的 DSH 权限预设：选择 **Ask / Workspace Write** 时每次执行都会请求用户批准；选择 **Full Access**（approval policy 为 `never`）时不再发起审批，代码会自动执行，也不会要求切换回“每次询问”。它是受约束的可信代码执行能力，不是强隔离安全沙箱：代码与 DSH 页面处于同一个 JavaScript realm，静态规则只能阻止常见的 DOM、网络和存储写法，不能作为不可绕过的权限边界。异步等待有 10 秒超时，但已启动的代码无法被真正终止，同步死循环也无法由同一 UI 线程强制中断；抛错或超时前已经完成的修改还可能被自动保存。Full Access 下不会出现最后一次人工复核，只应在你愿意信任自动生成代码时使用。
-
-## 使用 Workspace 文件列表
-
-在 DSH 自带的右侧 **Workspace 文件列表** 中展开目录并点击文件。普通代码、Markdown、图片、PDF 等格式继续使用 DSH 内置预览；本插件只为以下 Office 后缀注册优先级更高的 `Office (Univer)` 渲染器：
-
-| 类型 | 可打开 | 可保存 |
-| --- | --- | --- |
-| Sheet | `.xls`、`.xlsx`、`.csv` | `.xlsx`、`.csv`；`.xls` 将另存为同名 `.xlsx` |
-| Doc | `.doc`、`.docx` | `.docx` |
-| Slide | `.ppt`、`.pptx` | `.pptx` |
-
-打开 Office 文件后，可以直接在右侧文档预览中的 Univer 编辑器里修改。点击 **保存** 后：
-
-- `.xlsx`、`.csv`、`.docx`、`.pptx` 原位保存。
+- `.xlsx`、`.csv`、`.docx`、`.pptx` 会原位保存。
 - `.xls` 不覆盖原文件，而是在同目录生成同名 `.xlsx`。
-- 旧版 `.doc` 和 `.ppt` 可以打开，但不能按旧格式原位保存。
-- 如果文件在打开后被其他程序修改，插件会拒绝覆盖；刷新并重新打开文件后再保存。
+- `.doc` 和 `.ppt` 可以打开，但需要分别保存为 `.docx` 和 `.pptx`。
+- 如果文件在打开后被其他程序修改，插件会拒绝覆盖。请重新打开文件后再编辑和保存。
 
-DSH 内置预览必须先完整读取二进制文件，其大小上限由 DSH Host 的 `workspaceFiles.maxFileBytes` 控制（当前默认 32 MiB）；插件自身的转换和保存接口上限为 300 MiB。
+## 保存到 workspace
 
-## 数据保存说明
+在 Univer 编辑器中首次保存时，需要填写 workspace 内的相对路径，例如：
 
-### 会话内编辑状态
+```text
+reports/sales-report.xlsx
+```
 
-Univer 视图中的 Sheet、Doc、Slide 快照由 Host 按 session 保存。切换会话标签或重新挂载编辑器时，插件会尝试恢复该会话之前的内容。
-
-Sheet、Doc、Slide 使用独立的存储记录，不会互相覆盖。
-
-### 保存到 workspace
-
-点击 Univer 编辑器中的 **保存** 时，文件会写入当前 session workspace，而不是任意系统目录。
-
-保存路径必须满足：
+保存路径需满足：
 
 - 使用 workspace 内的相对路径。
-- 后缀与目标格式一致：`.xlsx`、`.docx` 或 `.pptx`。
+- 文件后缀与内容类型一致。
 - 父目录已经存在。
 - 不能使用 `..` 或符号链接跳出 workspace。
 
 如果目标文件已经存在，界面会询问是否覆盖。
 
-## 转换服务与环境变量
-
-插件启动时会自动创建 Office 转换子进程，执行内置的：
-
-```text
-server/export-file.mjs
-```
-
-默认端点：
-
-```text
-http://127.0.0.1:8787/api/univer/import-file
-http://127.0.0.1:8787/api/univer/export-file
-```
-
-支持以下环境变量：
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `8787` | Office 转换服务监听端口 |
-| `CORS_ORIGIN` | 请求 Origin，缺省时为 `http://127.0.0.1:3080` | 转换服务允许的浏览器 Origin |
-| `UNIVER_FILE_IMPORT_ENDPOINT` | `http://127.0.0.1:8787/api/univer/import-file` | Host 侧 Workspace Viewer 使用的导入端点 |
-| `UNIVER_FILE_EXPORT_ENDPOINT` | `http://127.0.0.1:8787/api/univer/export-file` | Host 侧 Univer Create 和 Workspace Viewer 使用的导出端点 |
-
-例如将转换服务改为 `8790` 端口：
-
-```bash
-PORT=8790 \
-UNIVER_FILE_IMPORT_ENDPOINT=http://127.0.0.1:8790/api/univer/import-file \
-UNIVER_FILE_EXPORT_ENDPOINT=http://127.0.0.1:8790/api/univer/export-file \
-dsh web
-```
-
-注意：当前 Web Client 的手动“打开/导出”请求默认使用 `http://127.0.0.1:8787`。如果 DSH Web 运行在远程主机、反向代理后面，或者需要修改浏览器侧转换地址，应同步调整客户端配置；只修改 Host 环境变量不能改变浏览器侧已经固定的地址。
-
 ## 常见问题
 
-### Office 文件打开或保存时报“无法连接转换服务”
+### 无法连接转换服务
 
-检查：
+请检查：
 
-- `8787` 端口是否被其他程序占用。
-- DSH 启动日志中转换子进程是否报错。
-- `UNIVER_FILE_IMPORT_ENDPOINT` 和 `UNIVER_FILE_EXPORT_ENDPOINT` 是否与 `PORT` 一致。
-- 浏览器是否能访问 `127.0.0.1:8787`。
-- `CORS_ORIGIN` 是否与实际 DSH Web Origin 一致。
+- `8787` 端口是否被占用。
+- DSH 启动日志中的转换服务是否报错。
+- 浏览器是否能够访问 `127.0.0.1:8787`。
 
-### 保存时报“目标目录不存在”
+### 目标目录不存在
 
-插件不会自动创建父目录。先在当前 session workspace 中创建目录，再保存文件。
+插件不会自动创建父目录。例如保存到 `reports/weekly.docx` 前，请先确保 workspace 中存在 `reports/` 目录。
 
-例如保存到：
+### 文件已经改变
 
-```text
-reports/weekly.docx
-```
+文件打开后可能被其他程序修改。请重新加载或关闭后重新打开文件，确认内容后再保存。
 
-需要先确保 `reports/` 已存在。
+### 为什么旧版 Office 文件不能原格式保存
 
-### 保存时报文件已经改变
+旧版 `.xls`、`.doc` 和 `.ppt` 可以导入，但导出使用较新的 Office 格式：
 
-Office 预览会记录文件打开时的修改时间。如果文件随后被其他程序修改，插件会阻止覆盖。使用 DSH 内置预览的重新加载操作或关闭后重新打开文件，确认内容后再保存。
-
-### `.xls`、`.doc` 或 `.ppt` 为什么不能原格式保存
-
-这些旧版格式可以导入，但当前导出能力以 OOXML 格式为主：
-
-- `.xls` 另存为 `.xlsx`。
-- `.doc` 需要保存为 `.docx`。
-- `.ppt` 需要保存为 `.pptx`。
-
+- `.xls` 保存为 `.xlsx`。
+- `.doc` 保存为 `.docx`。
+- `.ppt` 保存为 `.pptx`。
