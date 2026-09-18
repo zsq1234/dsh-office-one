@@ -93,7 +93,10 @@ test('successful resident code execution persists each supported unit snapshot',
   assert.match(client, /normalizeWorkbookSnapshot\(mounted\.univerAPI\.getActiveWorkbook\(\)\?\.save\(\)\)/)
   assert.match(client, /mounted\.univerAPI\.getActiveDocument\(\)\?\.save\(\)/)
   assert.match(client, /\(\) => presentation\.save\(\)/)
-  assert.match(client, /'save', \{ sessionId, unitType: request\.unitType, snapshot \}/)
+  assert.match(client, /unitType: request\.unitType,[\s\S]*?snapshot,/)
+  assert.match(client, /entry\.pendingSaveRef\.current = queued/)
+  assert.match(client, /fileId: targetFileId/)
+  assert.match(client, /entry\.activeFileIdRef\?\.current !== targetFileId/)
   for (const unitType of ['sheet', 'doc', 'slide']) {
     assert.match(client, new RegExp(`registerResidentRuntime\\(\\s*sessionId,\\s*'${unitType}'`))
   }

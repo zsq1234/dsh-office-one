@@ -96,6 +96,7 @@ type SheetOperationId = number | string
 
 type SheetOperation =
   | { seq: SheetOperationId; action: 'new'; title?: string; sheetName?: string; rows?: number; columns?: number }
+  | { seq: SheetOperationId; action: 'select-file'; fileId: string }
   | { seq: SheetOperationId; action: 'add-sheet'; name: string; rows?: number; columns?: number }
   | { seq: SheetOperationId; action: 'delete-sheet'; name: string }
   | { seq: SheetOperationId; action: 'rename-sheet'; oldName: string; newName: string }
@@ -115,6 +116,7 @@ type SheetOperation =
 
 type DocOperation =
   | { seq: SheetOperationId; action: 'new-doc'; title?: string; text?: string }
+  | { seq: SheetOperationId; action: 'select-file'; fileId: string }
   | { seq: SheetOperationId; action: 'get-doc-text' }
   | { seq: SheetOperationId; action: 'set-doc-text'; text: string }
   | { seq: SheetOperationId; action: 'insert-doc-text'; index: number; text: string }
@@ -133,6 +135,7 @@ type DocOperation =
 
 type SlideOperation =
   | { seq: SheetOperationId; action: 'new-slide'; title?: string; width?: number; height?: number }
+  | { seq: SheetOperationId; action: 'select-file'; fileId: string }
   | { seq: SheetOperationId; action: 'list-slides' }
   | { seq: SheetOperationId; action: 'add-slide'; title?: string; index?: number }
   | { seq: SheetOperationId; action: 'delete-slide'; index: number }
@@ -189,6 +192,8 @@ const UNIVER_EXPORT_ENDPOINT = 'http://127.0.0.1:8787/api/univer/export-file'
 
 const SHEET_TOOL_NAMES = new Set([
   'univer_sheet_new',
+  'univer_sheet_file_list',
+  'univer_sheet_file_select',
   'univer_sheet_add',
   'univer_sheet_delete',
   'univer_sheet_rename',
@@ -210,6 +215,10 @@ function sheetOperationFromArgs(name: string, args: Record<string, unknown>, seq
       columns: typeof args.columns === 'number' ? args.columns : undefined,
     }
   }
+  if (name === 'univer_sheet_file_select' || name === 'select-file') {
+    return typeof args.fileId === 'string' ? { seq, action: 'select-file', fileId: args.fileId } : null
+  }
+  if (name === 'univer_sheet_file_list' || name === 'list-files') return null
   if (name === 'univer_sheet_add' || name === 'add-sheet') {
     if (typeof args.name !== 'string') return null
     return {
@@ -387,8 +396,8 @@ function queuedSheetOperation(queued: QueuedUniverOperation): SheetOperation | n
     : null
 }
 
-const DOC_OPERATION_ACTIONS = new Set(['new-doc', 'set-doc-text', 'insert-doc-text', 'append-doc-text', 'delete-doc-range', 'format-doc-text'])
-const SLIDE_OPERATION_ACTIONS = new Set(['new-slide', 'add-slide', 'delete-slide', 'add-slide-text', 'add-slide-shape', 'update-slide-text', 'delete-slide-element'])
+const DOC_OPERATION_ACTIONS = new Set(['new-doc', 'select-file', 'set-doc-text', 'insert-doc-text', 'append-doc-text', 'delete-doc-range', 'format-doc-text'])
+const SLIDE_OPERATION_ACTIONS = new Set(['new-slide', 'select-file', 'add-slide', 'delete-slide', 'add-slide-text', 'add-slide-shape', 'update-slide-text', 'delete-slide-element'])
 
 function queuedDocOperation(queued: QueuedUniverOperation): DocOperation | null {
   if (queued.unitType !== 'doc' || !DOC_OPERATION_ACTIONS.has(String(queued.operation.action))) return null
@@ -421,6 +430,8 @@ async function commitOperations(
 
 const DOC_TOOL_NAMES = new Set([
   'univer_doc_new',
+  'univer_doc_file_list',
+  'univer_doc_file_select',
   'univer_doc_get_text',
   'univer_doc_set_text',
   'univer_doc_insert_text',
@@ -442,6 +453,8 @@ function docOperationFromNode(node: ConversationNode): DocOperation | null {
     return null
   }
 
+  if (node.call.name === 'univer_doc_file_select') return typeof args.fileId === 'string' ? { seq: node.seq, action: 'select-file', fileId: args.fileId } : null
+  if (node.call.name === 'univer_doc_file_list') return null
   if (node.call.name === 'univer_doc_new') {
     return {
       seq: node.seq,
@@ -482,6 +495,8 @@ function docOperationFromNode(node: ConversationNode): DocOperation | null {
 
 const SLIDE_TOOL_NAMES = new Set([
   'univer_slide_new',
+  'univer_slide_file_list',
+  'univer_slide_file_select',
   'univer_slide_list',
   'univer_slide_add',
   'univer_slide_delete',
@@ -504,6 +519,8 @@ function slideOperationFromNode(node: ConversationNode): SlideOperation | null {
   }
 
   const numberArg = (key: string) => typeof args[key] === 'number' ? args[key] : undefined
+  if (node.call.name === 'univer_slide_file_select') return typeof args.fileId === 'string' ? { seq: node.seq, action: 'select-file', fileId: args.fileId } : null
+  if (node.call.name === 'univer_slide_file_list') return null
   if (node.call.name === 'univer_slide_new') {
     return {
       seq: node.seq,
@@ -653,6 +670,141 @@ function SavePathDialog({ extension, suggestedName, busy, onCancel, onSave }: Sa
 }
 
 type UnitFileState = { path: string | null; snapshot: unknown | null }
+type SheetFileMeta = { id: string; title: string; filePath: string | null; updatedAt: number }
+type SheetFilesState = { activeFileId: string | null; files: SheetFileMeta[] }
+type SwitchedSheetFile = UnitFileState & { activeFileId: string; title: string; workbookSnapshot: unknown }
+type RestoredUnitState = SheetFilesState & UnitFileState & { unitSnapshot: unknown | null; revision: number }
+type ClosedUnitFile = SheetFilesState & UnitFileState & { title: string | null; unitSnapshot: unknown | null }
+
+async function closeUnitFile(sessionId: string, unitType: UniverUnitType, fileId: string): Promise<ClosedUnitFile> {
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'close-unit-file', { sessionId, unitType, fileId })
+  if (!result.ok) throw new Error(result.error.message)
+  const value = result.value as Record<string, unknown>
+  if (value === null || typeof value !== 'object' || !Array.isArray(value.files)) throw new Error('Host 返回了无效的关闭文件结果')
+  const files = value.files.flatMap((item): SheetFileMeta[] => {
+    if (item === null || typeof item !== 'object') return []
+    const file = item as Record<string, unknown>
+    return typeof file.id === 'string' && typeof file.title === 'string' && typeof file.updatedAt === 'number'
+      ? [{ id: file.id, title: file.title, filePath: typeof file.filePath === 'string' ? file.filePath : null, updatedAt: file.updatedAt }]
+      : []
+  })
+  return {
+    activeFileId: typeof value.activeFileId === 'string' ? value.activeFileId : null,
+    title: typeof value.title === 'string' ? value.title : null,
+    unitSnapshot: value.snapshot ?? null,
+    path: typeof value.path === 'string' ? value.path : null,
+    snapshot: value.fileSnapshot ?? null,
+    files,
+  }
+}
+
+async function loadUnitState(sessionId: string, unitType: UniverUnitType): Promise<RestoredUnitState> {
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'unit-state', { sessionId, unitType })
+  if (!result.ok) throw new Error(result.error.message)
+  const value = result.value as Record<string, unknown>
+  if (value === null || typeof value !== 'object' || !('snapshot' in value) || !Array.isArray(value.files)) throw new Error('Host 返回了无效的 Univer 状态')
+  const files = value.files.flatMap((item): SheetFileMeta[] => {
+    if (item === null || typeof item !== 'object') return []
+    const file = item as Record<string, unknown>
+    return typeof file.id === 'string' && typeof file.title === 'string' && typeof file.updatedAt === 'number'
+      ? [{ id: file.id, title: file.title, filePath: typeof file.filePath === 'string' ? file.filePath : null, updatedAt: file.updatedAt }]
+      : []
+  })
+  return {
+    unitSnapshot: value.snapshot,
+    path: typeof value.path === 'string' ? value.path : null,
+    snapshot: value.fileSnapshot ?? null,
+    activeFileId: typeof value.activeFileId === 'string' ? value.activeFileId : null,
+    files,
+    revision: typeof value.revision === 'number' ? value.revision : 0,
+  }
+}
+
+async function loadUnitFiles(sessionId: string, unitType: UniverUnitType): Promise<SheetFilesState> {
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'unit-files', { sessionId, unitType })
+  if (!result.ok) throw new Error(result.error.message)
+  const value = result.value as { activeFileId?: unknown; files?: unknown }
+  if (value === null || typeof value !== 'object' || !Array.isArray(value.files)) throw new Error('Host 返回了无效的 Univer 文件列表')
+  const files = value.files.flatMap((item): SheetFileMeta[] => {
+    if (item === null || typeof item !== 'object') return []
+    const file = item as Record<string, unknown>
+    if (typeof file.id !== 'string' || typeof file.title !== 'string' || typeof file.updatedAt !== 'number') return []
+    return [{ id: file.id, title: file.title, filePath: typeof file.filePath === 'string' ? file.filePath : null, updatedAt: file.updatedAt }]
+  })
+  return { activeFileId: typeof value.activeFileId === 'string' ? value.activeFileId : null, files }
+}
+
+async function loadSheetFiles(sessionId: string): Promise<SheetFilesState> {
+  return loadUnitFiles(sessionId, 'sheet')
+}
+
+async function switchUnitFile(
+  sessionId: string,
+  unitType: UniverUnitType,
+  fileId: string,
+  currentSnapshot: unknown,
+  options: { title?: string; filePath?: string | null; targetSnapshot?: unknown; operationIds?: string[]; sourceFileId?: string | null } = {},
+): Promise<SwitchedSheetFile> {
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'switch-unit-file', {
+    sessionId,
+    unitType,
+    fileId,
+    currentSnapshot,
+    clientId: univerCodeClientId,
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.filePath === undefined ? {} : { filePath: options.filePath }),
+    ...(options.targetSnapshot === undefined ? {} : { targetSnapshot: options.targetSnapshot }),
+    ...(options.operationIds === undefined ? {} : { operationIds: options.operationIds }),
+    ...(options.sourceFileId === undefined ? {} : { sourceFileId: options.sourceFileId }),
+  })
+  if (!result.ok) throw new Error(result.error.message)
+  const value = result.value as Record<string, unknown>
+  if (value === null || typeof value !== 'object' || typeof value.activeFileId !== 'string' || value.snapshot === undefined || typeof value.title !== 'string') {
+    throw new Error('Host 返回了无效的 Univer 文件切换结果')
+  }
+  return { activeFileId: value.activeFileId, title: value.title, workbookSnapshot: value.snapshot, path: typeof value.filePath === 'string' ? value.filePath : null, snapshot: value.fileSnapshot ?? null }
+}
+
+async function switchSheetFile(
+  sessionId: string,
+  fileId: string,
+  currentSnapshot: unknown,
+  options: { title?: string; filePath?: string | null; targetSnapshot?: unknown; operationIds?: string[]; sourceFileId?: string | null } = {},
+): Promise<SwitchedSheetFile> {
+  const connection = clientConnection.current
+  if (connection === null) throw new Error('Host 连接不可用')
+  const result = await connection.rpc.call('/dsh-univer-create', 'switch-sheet-file', {
+    sessionId,
+    fileId,
+    currentSnapshot,
+    clientId: univerCodeClientId,
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.filePath === undefined ? {} : { filePath: options.filePath }),
+    ...(options.targetSnapshot === undefined ? {} : { targetSnapshot: options.targetSnapshot }),
+    ...(options.operationIds === undefined ? {} : { operationIds: options.operationIds }),
+    ...(options.sourceFileId === undefined ? {} : { sourceFileId: options.sourceFileId }),
+  })
+  if (!result.ok) throw new Error(result.error.message)
+  const value = result.value as Record<string, unknown>
+  if (value === null || typeof value !== 'object' || typeof value.activeFileId !== 'string' || value.snapshot === undefined || typeof value.title !== 'string') {
+    throw new Error('Host 返回了无效的表格切换结果')
+  }
+  return {
+    activeFileId: value.activeFileId,
+    title: value.title,
+    workbookSnapshot: value.snapshot,
+    path: typeof value.filePath === 'string' ? value.filePath : null,
+    snapshot: value.fileSnapshot ?? null,
+  }
+}
 
 async function loadUnitFileState(sessionId: string, unitType: UniverUnitType): Promise<UnitFileState> {
   const connection = clientConnection.current
@@ -686,12 +838,17 @@ function confirmOpenWithUnsavedChanges(snapshot: unknown, baseline: string | nul
   return JSON.stringify(snapshot) === baseline || window.confirm(message)
 }
 
+function confirmCloseFile(snapshot: unknown, baseline: string | null, filePath: string | null, message: string): boolean {
+  return (filePath !== null && JSON.stringify(snapshot) === baseline) || window.confirm(message)
+}
+
 async function saveUnitFile(
   sessionId: string,
   unitType: UniverUnitType,
   snapshot: unknown,
   filePath: string,
   overwrite: boolean,
+  fileId?: string | null,
 ): Promise<string> {
   if (clientConnection.current === null) throw new Error('Host 连接不可用')
   const result = await clientConnection.current.rpc.call('/dsh-univer-create', 'export', {
@@ -700,6 +857,7 @@ async function saveUnitFile(
     snapshot,
     filePath,
     overwrite,
+    ...(fileId === undefined || fileId === null ? {} : { fileId }),
   })
   if (!result.ok) throw new UniverExportError(result.error.code, result.error.message)
   const value = result.value as { path?: unknown }
@@ -991,6 +1149,8 @@ type ResidentRuntimeEntry = {
   pendingSaveRef: React.MutableRefObject<Promise<void> | null>
   lastSavedRef: React.MutableRefObject<string | null>
   lastFileSnapshotRef: React.MutableRefObject<string | null>
+  activeFileIdRef?: React.MutableRefObject<string | null>
+  fileId?: string | null
 }
 
 const residentRuntimes = new Map<string, ResidentRuntimeEntry>()
@@ -1036,6 +1196,7 @@ function registerResidentRuntime(
   pendingSaveRef: React.MutableRefObject<Promise<void> | null>,
   lastSavedRef: React.MutableRefObject<string | null>,
   lastFileSnapshotRef: React.MutableRefObject<string | null>,
+  activeFileIdRef?: React.MutableRefObject<string | null>,
 ): void {
   const key = residentRuntimeKey(sessionId, unitType)
   const previous = residentRuntimes.get(key)
@@ -1048,7 +1209,13 @@ function registerResidentRuntime(
     lastSavedRef.current = previous.lastSavedRef.current
     lastFileSnapshotRef.current = previous.lastFileSnapshotRef.current
   }
-  residentRuntimes.set(key, { sessionId, unitType, runtime, save, savingRef, pendingSaveRef, lastSavedRef, lastFileSnapshotRef })
+  const fileId = previous?.runtime === runtime ? previous.fileId : activeFileIdRef?.current
+  residentRuntimes.set(key, { sessionId, unitType, runtime, save, savingRef, pendingSaveRef, lastSavedRef, lastFileSnapshotRef, activeFileIdRef, fileId })
+}
+
+function updateResidentFileId(sessionId: string, unitType: UniverUnitType, fileId: string | null): void {
+  const entry = residentRuntimes.get(residentRuntimeKey(sessionId, unitType))
+  if (entry !== undefined) entry.fileId = fileId
 }
 
 function disposeResidentRuntime(sessionId: string, unitType: UniverUnitType, runtime: ResidentMountedRuntime | null): void {
@@ -1203,6 +1370,8 @@ async function executeResidentCodeRequest(sessionId: string, request: UniverCode
   if (connection === null || entry === undefined || residentCodeRequestsInFlight.has(request.id)) return
   residentCodeRequestsInFlight.add(request.id)
   const pendingSave = entry.pendingSaveRef.current
+  const targetFileId = entry.activeFileIdRef?.current
+  entry.savingRef.current = true
   const queued = enqueueResidentRuntimeTask(key, async () => {
     if (currentResidentSessionId !== sessionId || residentRuntimes.get(key) !== entry) return
     const claimed = await connection.rpc.call('/dsh-univer-create', 'univer-code-claim', {
@@ -1215,13 +1384,19 @@ async function executeResidentCodeRequest(sessionId: string, request: UniverCode
     try {
       await pendingSave
       if (residentRuntimes.get(key) !== entry) throw new Error(`当前浏览器没有打开已创建的 Univer ${request.unitType}`)
-      entry.savingRef.current = true
+      if (entry.activeFileIdRef?.current !== targetFileId) throw new Error(`Univer ${request.unitType} 文件在代码执行前已切换`)
       debugUniverCode(sessionId, request.unitType, request.id, request.code)
       execution = await executeFacadeCode(request.code, entry.runtime.univerAPI)
       if (execution.error === undefined) {
+        if (residentRuntimes.get(key) !== entry || entry.activeFileIdRef?.current !== targetFileId) throw new Error(`Univer ${request.unitType} 在代码执行期间已切换`)
         const snapshot = entry.save()
         if (snapshot === undefined || snapshot === null) throw new Error(`当前没有活动的 Univer ${request.unitType}`)
-        const saved = await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: request.unitType, snapshot })
+        const saved = await connection.rpc.call('/dsh-univer-create', 'save', {
+          sessionId,
+          unitType: request.unitType,
+          snapshot,
+          ...(targetFileId === null || targetFileId === undefined ? {} : { fileId: targetFileId }),
+        })
         if (!saved.ok) throw new Error(saved.error.message)
         entry.lastSavedRef.current = JSON.stringify(snapshot)
       }
@@ -1230,8 +1405,6 @@ async function executeResidentCodeRequest(sessionId: string, request: UniverCode
         error: `${reason instanceof Error ? reason.message : String(reason)}. Code execution is not transactional; inspect the document for partial changes.`,
         logs: execution.logs,
       }
-    } finally {
-      entry.savingRef.current = false
     }
     await connection.rpc.call('/dsh-univer-create', 'univer-code-result', {
       sessionId,
@@ -1240,10 +1413,15 @@ async function executeResidentCodeRequest(sessionId: string, request: UniverCode
       ...execution,
     }).catch(() => {})
   })
+  entry.pendingSaveRef.current = queued
   try {
     await queued
   } finally {
     residentCodeRequestsInFlight.delete(request.id)
+    if (entry.pendingSaveRef.current === queued) {
+      entry.pendingSaveRef.current = null
+      entry.savingRef.current = false
+    }
   }
 }
 
@@ -1360,6 +1538,11 @@ function SheetProductView(props: ProductViewProps) {
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [filePath, setFilePath] = useState<string | null>(null)
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
+  const activeFileIdRef = useRef<string | null>(null)
+  const nextRuntimeTitleRef = useRef<string | null>(null)
+  const [sheetFiles, setSheetFiles] = useState<SheetFileMeta[]>([])
+  const [switchingFile, setSwitchingFile] = useState(false)
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [sheetVisible, setSheetVisible] = useState(() => openedWorkbookSessions.has(sessionId))
@@ -1397,6 +1580,9 @@ function SheetProductView(props: ProductViewProps) {
     lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
+    activeFileIdRef.current = null
+    setActiveFileId(null)
+    setSheetFiles([])
     setSaveDialogOpen(false)
     setSaveNotice('')
     hydratedFromHostRef.current = false
@@ -1405,21 +1591,23 @@ function SheetProductView(props: ProductViewProps) {
     setHostLoaded(false)
     setSheetVisible(runtimeRef.current !== null || openedWorkbookSessions.has(sessionId))
     const restore = async () => {
-      const connection = clientConnection.current
-      if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFileState] = await Promise.all([
-        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'sheet' }),
-        loadUnitFileState(sessionId, 'sheet'),
-      ])
+      const restored = await loadUnitState(sessionId, 'sheet')
       if (cancelled) return
-      if (!result.ok) throw new Error(result.error.message)
-      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
-        throw new Error('Host 返回了无效的表格快照')
+      if (restored.unitSnapshot !== null && (typeof restored.unitSnapshot !== 'object' || Array.isArray(restored.unitSnapshot))) throw new Error('Host 返回了无效的表格快照')
+      const resident = runtimeRef.current
+      const residentEntry = residentRuntimes.get(residentRuntimeKey(sessionId, 'sheet'))
+      if (resident !== null && residentEntry?.fileId !== restored.activeFileId) {
+        disposeResidentRuntime(sessionId, 'sheet', resident)
+        runtimeRef.current = null
       }
-      setFilePath(restoredFileState.path)
-      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
-      if (result.value !== null) {
-        setHostSnapshot(result.value)
+      setFilePath(restored.path)
+      activeFileIdRef.current = restored.activeFileId
+      nextRuntimeTitleRef.current = restored.files.find((file) => file.id === restored.activeFileId)?.title ?? null
+      setActiveFileId(restored.activeFileId)
+      setSheetFiles(restored.files)
+      lastFileSnapshotRef.current = restored.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restored.snapshot)
+      if (restored.unitSnapshot !== null) {
+        setHostSnapshot(restored.unitSnapshot)
       } else {
         openedWorkbookSessions.delete(sessionId)
         setSheetVisible(false)
@@ -1451,6 +1639,7 @@ function SheetProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
     }
     if (!hostLoaded) return
@@ -1495,13 +1684,16 @@ function SheetProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
       openedWorkbookSessions.add(sessionId)
       setSheetVisible(true)
       const snapshotTitle = snapshot !== null && typeof snapshot === 'object' && typeof (snapshot as any).name === 'string'
         ? (snapshot as any).name
         : undefined
-      setTitle(operation?.title ?? snapshotTitle ?? ui.defaultSheetTitle)
+      const runtimeTitle = operation?.title ?? nextRuntimeTitleRef.current ?? snapshotTitle ?? ui.defaultSheetTitle
+      nextRuntimeTitleRef.current = null
+      setTitle(runtimeTitle)
     }
 
     try {
@@ -1518,14 +1710,93 @@ function SheetProductView(props: ProductViewProps) {
       if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
+        if (operation.action === 'select-file') {
+          const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+          if (workbook === null || workbook === undefined) throw new Error('当前没有可切换的工作簿')
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const selection = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const currentWorkbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+            if (currentWorkbook === undefined || currentWorkbook === null) throw new Error('当前工作簿在切换前已关闭')
+            const currentSnapshot = normalizeWorkbookSnapshot(currentWorkbook.save())
+            const switched = await switchSheetFile(sessionId, operation.fileId, currentSnapshot, { operationIds: [String(operation.seq)], sourceFileId: activeFileIdRef.current })
+            lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+            lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+            setFilePath(switched.path)
+            activeFileIdRef.current = switched.activeFileId
+            setActiveFileId(switched.activeFileId)
+            setTitle(switched.title)
+            nextRuntimeTitleRef.current = switched.title
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot)
+            createRuntime(undefined, switched.workbookSnapshot)
+            const catalog = await loadSheetFiles(sessionId)
+            setSheetFiles(catalog.files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = selection
+          void selection.catch((reason) => {
+            setError(`切换表格文件失败：${reason instanceof Error ? reason.message : String(reason)}`)
+          }).finally(() => {
+            if (pendingSaveRef.current === selection) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
+        }
         if (operation.action === 'new') {
-          createRuntime(operation)
-          setFilePath(null)
-          setSaveNotice('')
-          const blankSnapshot = normalizeWorkbookSnapshot(runtimeRef.current?.univerAPI.getActiveWorkbook()?.save())
-          void clientConnection.current?.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot: blankSnapshot, filePath: null })
-          appliedRef.current.add(operation.seq)
-          continue
+          if (activeFileIdRef.current === null) {
+            createRuntime(operation)
+            setFilePath(null)
+            setSaveNotice('')
+            appliedRef.current.add(operation.seq)
+            continue
+          }
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const creation = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const current = runtimeRef.current?.univerAPI.getActiveWorkbook()
+            if (current === null || current === undefined) throw new Error('当前工作簿在新建前已关闭')
+            const blankSnapshot = normalizeWorkbookSnapshot(workbookData(operation, operation.title ?? ui.defaultSheetTitle))
+            const switched = await switchSheetFile(sessionId, crypto.randomUUID(), normalizeWorkbookSnapshot(current.save()), {
+              title: operation.title ?? ui.defaultSheetTitle,
+              filePath: null,
+              targetSnapshot: blankSnapshot,
+              operationIds: [String(operation.seq)],
+              sourceFileId: activeFileIdRef.current,
+            })
+            lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+            lastFileSnapshotRef.current = UNKNOWN_FILE_SNAPSHOT
+            activeFileIdRef.current = switched.activeFileId
+            nextRuntimeTitleRef.current = switched.title
+            setActiveFileId(switched.activeFileId)
+            setFilePath(null)
+            setTitle(switched.title)
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot)
+            createRuntime(undefined, switched.workbookSnapshot)
+            setSheetFiles((await loadSheetFiles(sessionId)).files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = creation
+          void creation.catch((reason) => setError(`新建表格文件失败：${reason instanceof Error ? reason.message : String(reason)}`)).finally(() => {
+            if (pendingSaveRef.current === creation) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
         }
 
         const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
@@ -1609,6 +1880,13 @@ function SheetProductView(props: ProductViewProps) {
           const snapshot = normalizeWorkbookSnapshot(workbook.save())
           const serialized = JSON.stringify(snapshot)
           await commitOperations(sessionId, 'sheet', snapshot, queuedIds)
+          if (activeFileIdRef.current === null) {
+            const catalog = await loadUnitFiles(sessionId, 'sheet')
+            activeFileIdRef.current = catalog.activeFileId
+            updateResidentFileId(sessionId, 'sheet', catalog.activeFileId)
+            setActiveFileId(catalog.activeFileId)
+            setSheetFiles(catalog.files)
+          }
           lastSavedRef.current = serialized
         })()
         pendingSaveRef.current = commit
@@ -1639,7 +1917,7 @@ function SheetProductView(props: ProductViewProps) {
       const save = clientConnection.current.rpc.call(
         '/dsh-univer-create',
         'save',
-        { sessionId, unitType: 'sheet', snapshot: nextSnapshot },
+        { sessionId, unitType: 'sheet', snapshot: nextSnapshot, fileId: activeFileIdRef.current },
       ).then((result) => {
         if (result.ok) lastSavedRef.current = serialized
       }).catch((reason) => {
@@ -1690,7 +1968,7 @@ function SheetProductView(props: ProductViewProps) {
         const workbook = resident.univerAPI.getActiveWorkbook()
         if (workbook === undefined || workbook === null) return
         const snapshot = normalizeWorkbookSnapshot(workbook.save())
-        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot })
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'sheet', snapshot, fileId: activeFileIdRef.current })
       })
     }
     parkResidentRuntime(sessionId, 'sheet', resident)
@@ -1698,9 +1976,108 @@ function SheetProductView(props: ProductViewProps) {
     appliedRef.current.clear()
   }, [sessionId])
 
-  const saveAsXlsx = async (chosenPath?: string) => {
+  const activateSheetFile = async (
+    targetFileId: string,
+    target?: { snapshot: unknown; title: string; filePath: string | null },
+  ) => {
     const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
-    if (workbook === undefined || workbook === null) {
+    if (workbook === undefined || workbook === null) throw new Error('当前没有可切换的工作簿')
+    if (target === undefined && targetFileId === activeFileId) return
+    const previousSave = pendingSaveRef.current
+    let releaseSwitch!: () => void
+    const switchGate = new Promise<void>((resolve) => { releaseSwitch = resolve })
+    pendingSaveRef.current = switchGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const currentWorkbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+      if (currentWorkbook === undefined || currentWorkbook === null) throw new Error('当前工作簿在切换前已关闭')
+      const currentSnapshot = normalizeWorkbookSnapshot(currentWorkbook.save())
+      const switched = await switchSheetFile(sessionId, targetFileId, currentSnapshot, target === undefined
+        ? { sourceFileId: activeFileIdRef.current }
+        : { title: target.title, filePath: target.filePath, targetSnapshot: target.snapshot, sourceFileId: activeFileIdRef.current })
+      disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      hydratedFromHostRef.current = true
+      lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+      lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+      activeFileIdRef.current = switched.activeFileId
+      setActiveFileId(switched.activeFileId)
+      setFilePath(switched.path)
+      setTitle(switched.title)
+      nextRuntimeTitleRef.current = switched.title
+      setSaveNotice('')
+      setHostSnapshot(switched.workbookSnapshot)
+      const catalog = await loadSheetFiles(sessionId)
+      setSheetFiles(catalog.files)
+      setLayoutVersion((value) => value + 1)
+    } finally {
+      releaseSwitch()
+      if (pendingSaveRef.current === switchGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
+  const closeCurrentWorkbook = async () => {
+    const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+    const fileId = activeFileIdRef.current
+    if (workbook === null || workbook === undefined || fileId === null) return
+    if (!confirmCloseFile(normalizeWorkbookSnapshot(workbook.save()), lastFileSnapshotRef.current, filePath, ui.confirmCloseUnsaved)) return
+    const previousSave = pendingSaveRef.current
+    let releaseClose!: () => void
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    pendingSaveRef.current = closeGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const closed = await closeUnitFile(sessionId, 'sheet', fileId)
+      disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      activeFileIdRef.current = closed.activeFileId
+      setActiveFileId(closed.activeFileId)
+      setSheetFiles(closed.files)
+      setFilePath(closed.path)
+      setSaveNotice('')
+      if (closed.activeFileId === null || closed.unitSnapshot === null) {
+        openedWorkbookSessions.delete(sessionId)
+        setHostSnapshot(null)
+        setSheetVisible(false)
+        setTitle(ui.defaultSheetTitle)
+        lastSavedRef.current = null
+        lastFileSnapshotRef.current = null
+      } else {
+        openedWorkbookSessions.add(sessionId)
+        nextRuntimeTitleRef.current = closed.title
+        setTitle(closed.title ?? ui.defaultSheetTitle)
+        lastSavedRef.current = JSON.stringify(closed.unitSnapshot)
+        lastFileSnapshotRef.current = closed.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(closed.snapshot)
+        setHostSnapshot(closed.unitSnapshot)
+        setSheetVisible(true)
+        setLayoutVersion((value) => value + 1)
+      }
+    } finally {
+      releaseClose()
+      if (pendingSaveRef.current === closeGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
+  const saveAsXlsx = async (chosenPath?: string) => {
+    if (runtimeRef.current?.univerAPI.getActiveWorkbook() === undefined || runtimeRef.current?.univerAPI.getActiveWorkbook() === null) {
       setError('当前没有可保存的工作簿')
       return
     }
@@ -1709,29 +2086,42 @@ function SheetProductView(props: ProductViewProps) {
       setSaveDialogOpen(true)
       return
     }
+    const previousSave = pendingSaveRef.current
     setExporting(true)
     setError(null)
     setSaveNotice('')
-    try {
+    savingRef.current = true
+    const save = (async () => {
+      await previousSave
+      const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+      if (workbook === undefined || workbook === null) throw new Error('当前工作簿在保存前已关闭')
       const nextSnapshot = normalizeWorkbookSnapshot(workbook.save())
+      const savingFileId = activeFileIdRef.current
       let savedPath: string
       try {
-        savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, chosenPath === undefined)
+        savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, chosenPath === undefined, savingFileId)
       } catch (reason) {
         if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
-          savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, true)
+          savedPath = await saveUnitFile(sessionId, 'sheet', nextSnapshot, targetPath, true, savingFileId)
         } else {
           throw reason
         }
       }
       setFilePath(savedPath)
+      setSheetFiles((files) => files.map((file) => file.id === savingFileId ? { ...file, filePath: savedPath, title } : file))
       setSaveDialogOpen(false)
       setSaveNotice(ui.savedTo(savedPath))
       lastFileSnapshotRef.current = JSON.stringify(nextSnapshot)
       lastSavedRef.current = lastFileSnapshotRef.current
+    })()
+    pendingSaveRef.current = save
+    try {
+      await save
     } catch (reason) {
       setError(`保存 XLSX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
+      if (pendingSaveRef.current === save) pendingSaveRef.current = null
+      savingRef.current = false
       setExporting(false)
     }
   }
@@ -1744,7 +2134,7 @@ function SheetProductView(props: ProductViewProps) {
     const result = await clientConnection.current.rpc.call(
       '/dsh-univer-create',
       'save',
-      { sessionId, unitType: 'sheet', snapshot: nextSnapshot, filePath: nextFilePath },
+      { sessionId, unitType: 'sheet', snapshot: nextSnapshot, filePath: nextFilePath, fileId: activeFileIdRef.current },
     )
     if (!result.ok) throw new Error(result.error.message)
     lastSavedRef.current = serialized
@@ -1752,28 +2142,24 @@ function SheetProductView(props: ProductViewProps) {
 
   const newWorkbook = async () => {
     const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
-    if (workbook !== undefined && workbook !== null && !confirmOpenWithUnsavedChanges(
-      normalizeWorkbookSnapshot(workbook.save()),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChangesForNew,
-    )) return
     const blankSnapshot = normalizeWorkbookSnapshot(workbookData({ action: 'new', seq: Date.now() }, ui.defaultSheetTitle))
-    disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
-    runtimeRef.current = null
-    // A manually created workbook replaces both the persisted workbook and any
-    // conversation operations that belong to the previous workbook.
-    appliedRef.current.clear()
-    hydratedFromHostRef.current = true
-    lastSavedRef.current = null
-    lastFileSnapshotRef.current = null
-    openedWorkbookSessions.add(sessionId)
     setError(null)
-    setTitle(ui.defaultSheetTitle)
-    setFilePath(null)
-    setSaveNotice('')
-    setHostSnapshot(blankSnapshot)
     try {
+      if (workbook !== undefined && workbook !== null) {
+        await activateSheetFile(crypto.randomUUID(), { snapshot: blankSnapshot, title: ui.defaultSheetTitle, filePath: null })
+        return
+      }
+      openedWorkbookSessions.add(sessionId)
+      setTitle(ui.defaultSheetTitle)
+      setFilePath(null)
+      setSaveNotice('')
+      setHostSnapshot(blankSnapshot)
       await persistHostSnapshot(blankSnapshot, null)
+      const catalog = await loadSheetFiles(sessionId)
+      activeFileIdRef.current = catalog.activeFileId
+      updateResidentFileId(sessionId, 'sheet', catalog.activeFileId)
+      setActiveFileId(catalog.activeFileId)
+      setSheetFiles(catalog.files)
     } catch (reason) {
       setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     }
@@ -1784,21 +2170,24 @@ function SheetProductView(props: ProductViewProps) {
     setError(null)
     try {
       const importedSnapshot = await importWorkbookFromFile(file)
-      disposeResidentRuntime(sessionId, 'sheet', runtimeRef.current)
-      runtimeRef.current = null
-      // An imported file replaces the conversation-generated workbook. Keep the
-      // historical tool calls from replaying over the imported workbook.
-      appliedRef.current.clear()
-      hydratedFromHostRef.current = true
-      lastSavedRef.current = null
-      lastFileSnapshotRef.current = null
-      openedWorkbookSessions.add(sessionId)
-      setHostSnapshot(importedSnapshot)
       const importedPath = openedFilePath(file)
-      setFilePath(importedPath)
-      setSaveNotice('')
-      setTitle(typeof importedSnapshot.name === 'string' ? importedSnapshot.name : file.name.replace(/\\.[^.]+$/, ''))
-      await persistHostSnapshot(importedSnapshot, importedPath)
+      const importedTitle = typeof importedSnapshot.name === 'string' ? importedSnapshot.name : file.name.replace(/\\.[^.]+$/, '')
+      const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
+      if (workbook !== undefined && workbook !== null) {
+        await activateSheetFile(crypto.randomUUID(), { snapshot: importedSnapshot, title: importedTitle, filePath: importedPath })
+      } else {
+        openedWorkbookSessions.add(sessionId)
+        setHostSnapshot(importedSnapshot)
+        setFilePath(importedPath)
+        setSaveNotice('')
+        setTitle(importedTitle)
+        await persistHostSnapshot(importedSnapshot, importedPath)
+        const catalog = await loadSheetFiles(sessionId)
+        activeFileIdRef.current = catalog.activeFileId
+        updateResidentFileId(sessionId, 'sheet', catalog.activeFileId)
+        setActiveFileId(catalog.activeFileId)
+        setSheetFiles(catalog.files)
+      }
     } catch (reason) {
       setError(`导入 XLSX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -1807,21 +2196,15 @@ function SheetProductView(props: ProductViewProps) {
   }
 
   const openWorkbookFile = () => {
-    const workbook = runtimeRef.current?.univerAPI.getActiveWorkbook()
-    if (workbook !== undefined && workbook !== null && !confirmOpenWithUnsavedChanges(
-      normalizeWorkbookSnapshot(workbook.save()),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChanges,
-    )) return
     fileInputRef.current?.click()
   }
 
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openWorkbookFile}>
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={openWorkbookFile}>
         {importing ? ui.opening : ui.open}
       </button>
-      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={newWorkbook}>
+      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={newWorkbook}>
         {ui.create}
       </button>
     </>
@@ -1836,15 +2219,37 @@ function SheetProductView(props: ProductViewProps) {
       }} />
       {sheetVisible && (
         <div className="dsh-univer-create-toolbar">
+          {sheetFiles.length > 0 && (
+            <label className="dsh-univer-create-file-selector" title={ui.workbookFiles}>
+              <span className="dsh-univer-create-sr-only">{ui.workbookFiles}</span>
+              <select
+                aria-label={ui.workbookFiles}
+                value={activeFileId ?? ''}
+                disabled={switchingFile || importing || exporting || operations.length > 0}
+                onChange={(event) => {
+                  const fileId = event.target.value
+                  if (fileId.length === 0 || fileId === activeFileId) return
+                  void activateSheetFile(fileId).catch((reason) => {
+                    setError(`切换表格文件失败：${reason instanceof Error ? reason.message : String(reason)}`)
+                  })
+                }}
+              >
+                {sheetFiles.map((file) => <option key={file.id} value={file.id}>{file.title}</option>)}
+              </select>
+            </label>
+          )}
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSheetOperations(operations.length) : ui.newFileHint)}
+            {switchingFile ? ui.switchingWorkbook : saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSheetOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
+          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void closeCurrentWorkbook().catch((reason) => setError(`关闭表格文件失败：${reason instanceof Error ? reason.message : String(reason)}`))}>
+            {ui.close}
+          </button>
           <button
             className="dsh-univer-create-action"
             type="button"
-            disabled={importing || exporting || !hostLoaded}
+            disabled={importing || exporting || switchingFile || !hostLoaded}
             onClick={() => void saveAsXlsx()}
           >
             {exporting ? ui.saving : ui.save}
@@ -1852,6 +2257,7 @@ function SheetProductView(props: ProductViewProps) {
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
+      {switchingFile && <div className="dsh-univer-create-switch-blocker" aria-live="polite">{ui.switchingWorkbook}</div>}
       {saveDialogOpen && <SavePathDialog extension="xlsx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsXlsx(path)} />}
       {hostLoaded && !sheetVisible && (
         <div className="dsh-univer-create-welcome" aria-label={ui.startSheet}>
@@ -1980,6 +2386,11 @@ function DocProductView(props: ProductViewProps) {
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [filePath, setFilePath] = useState<string | null>(null)
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
+  const activeFileIdRef = useRef<string | null>(null)
+  const nextRuntimeTitleRef = useRef<string | null>(null)
+  const [unitFiles, setUnitFiles] = useState<SheetFileMeta[]>([])
+  const [switchingFile, setSwitchingFile] = useState(false)
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [documentVisible, setDocumentVisible] = useState(() => openedDocumentSessions.has(sessionId))
@@ -2015,6 +2426,9 @@ function DocProductView(props: ProductViewProps) {
     lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
+    activeFileIdRef.current = null
+    setActiveFileId(null)
+    setUnitFiles([])
     setSaveDialogOpen(false)
     setSaveNotice('')
     hydratedFromHostRef.current = false
@@ -2023,21 +2437,23 @@ function DocProductView(props: ProductViewProps) {
     setHostLoaded(false)
     setDocumentVisible(runtimeRef.current !== null || openedDocumentSessions.has(sessionId))
     const restore = async () => {
-      const connection = clientConnection.current
-      if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFileState] = await Promise.all([
-        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'doc' }),
-        loadUnitFileState(sessionId, 'doc'),
-      ])
+      const restored = await loadUnitState(sessionId, 'doc')
       if (cancelled) return
-      if (!result.ok) throw new Error(result.error.message)
-      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
-        throw new Error('Host 返回了无效的文档快照')
+      if (restored.unitSnapshot !== null && (typeof restored.unitSnapshot !== 'object' || Array.isArray(restored.unitSnapshot))) throw new Error('Host 返回了无效的文档快照')
+      const resident = runtimeRef.current
+      const residentEntry = residentRuntimes.get(residentRuntimeKey(sessionId, 'doc'))
+      if (resident !== null && residentEntry?.fileId !== restored.activeFileId) {
+        disposeResidentRuntime(sessionId, 'doc', resident)
+        runtimeRef.current = null
       }
-      setFilePath(restoredFileState.path)
-      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
-      if (result.value !== null) {
-        setHostSnapshot(result.value)
+      setFilePath(restored.path)
+      activeFileIdRef.current = restored.activeFileId
+      nextRuntimeTitleRef.current = restored.files.find((file) => file.id === restored.activeFileId)?.title ?? null
+      setActiveFileId(restored.activeFileId)
+      setUnitFiles(restored.files)
+      lastFileSnapshotRef.current = restored.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restored.snapshot)
+      if (restored.unitSnapshot !== null) {
+        setHostSnapshot(restored.unitSnapshot)
       } else {
         openedDocumentSessions.delete(sessionId)
         setDocumentVisible(false)
@@ -2069,6 +2485,7 @@ function DocProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
     }
     if (!hostLoaded) return
@@ -2109,13 +2526,16 @@ function DocProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
       openedDocumentSessions.add(sessionId)
       setDocumentVisible(true)
       const snapshotTitle = restoredSnapshot !== null && typeof restoredSnapshot === 'object' && typeof (restoredSnapshot as any).title === 'string'
         ? (restoredSnapshot as any).title
         : undefined
-      setTitle(operation?.title ?? snapshotTitle ?? ui.defaultDocTitle)
+      const runtimeTitle = operation?.title ?? nextRuntimeTitleRef.current ?? snapshotTitle ?? ui.defaultDocTitle
+      nextRuntimeTitleRef.current = null
+      setTitle(runtimeTitle)
     }
 
     try {
@@ -2131,12 +2551,94 @@ function DocProductView(props: ProductViewProps) {
       if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
+        if (operation.action === 'select-file') {
+          const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
+          if (fDocument === null || fDocument === undefined) throw new Error('当前没有可切换的文档')
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const selection = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const current = runtimeRef.current?.univerAPI.getActiveDocument()
+            if (current === null || current === undefined) throw new Error('当前文档在切换前已关闭')
+            const switched = await switchUnitFile(sessionId, 'doc', operation.fileId, current.save(), { operationIds: [String(operation.seq)], sourceFileId: activeFileIdRef.current })
+            lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+            lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+            activeFileIdRef.current = switched.activeFileId
+            nextRuntimeTitleRef.current = switched.title
+            setActiveFileId(switched.activeFileId)
+            setFilePath(switched.path)
+            setTitle(switched.title)
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot)
+            createRuntime(undefined, switched.workbookSnapshot)
+            setUnitFiles((await loadUnitFiles(sessionId, 'doc')).files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = selection
+          void selection.catch((reason) => setError(`切换文档文件失败：${reason instanceof Error ? reason.message : String(reason)}`)).finally(() => {
+            if (pendingSaveRef.current === selection) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
+        }
         if (operation.action === 'new-doc') {
-          createRuntime(operation)
-          setFilePath(null)
-          setSaveNotice('')
-          appliedRef.current.add(operation.seq)
-          continue
+          if (activeFileIdRef.current === null) {
+            createRuntime(operation)
+            setFilePath(null)
+            setSaveNotice('')
+            appliedRef.current.add(operation.seq)
+            continue
+          }
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const creation = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const current = runtimeRef.current?.univerAPI.getActiveDocument()
+            if (current === null || current === undefined) throw new Error('当前文档在新建前已关闭')
+            const blankSnapshot = documentData(operation, locale, operation.title ?? ui.defaultDocTitle)
+            const switched = await switchUnitFile(sessionId, 'doc', crypto.randomUUID(), current.save(), {
+              title: operation.title ?? ui.defaultDocTitle,
+              filePath: null,
+              targetSnapshot: blankSnapshot,
+              sourceFileId: activeFileIdRef.current,
+            })
+            activeFileIdRef.current = switched.activeFileId
+            nextRuntimeTitleRef.current = switched.title
+            setActiveFileId(switched.activeFileId)
+            setFilePath(null)
+            setTitle(switched.title)
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot)
+            createRuntime(undefined, switched.workbookSnapshot)
+            const created = runtimeRef.current?.univerAPI.getActiveDocument()
+            if (created === null || created === undefined) throw new Error('新文档运行时创建失败')
+            if (operation.text && !created.insertText(0, operation.text)) throw new Error('无法写入新文档正文')
+            const finalSnapshot = created.save()
+            await commitOperations(sessionId, 'doc', finalSnapshot, [String(operation.seq)])
+            lastSavedRef.current = JSON.stringify(finalSnapshot)
+            lastFileSnapshotRef.current = UNKNOWN_FILE_SNAPSHOT
+            setHostSnapshot(finalSnapshot)
+            setUnitFiles((await loadUnitFiles(sessionId, 'doc')).files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = creation
+          void creation.catch((reason) => setError(`新建文档文件失败：${reason instanceof Error ? reason.message : String(reason)}`)).finally(() => {
+            if (pendingSaveRef.current === creation) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
         }
 
         const fDocument = runtimeRef.current?.univerAPI.getActiveDocument()
@@ -2187,6 +2689,13 @@ function DocProductView(props: ProductViewProps) {
           const nextSnapshot = fDocument.save()
           const serialized = JSON.stringify(nextSnapshot)
           await commitOperations(sessionId, 'doc', nextSnapshot, queuedIds)
+          if (activeFileIdRef.current === null) {
+            const catalog = await loadUnitFiles(sessionId, 'doc')
+            activeFileIdRef.current = catalog.activeFileId
+            updateResidentFileId(sessionId, 'doc', catalog.activeFileId)
+            setActiveFileId(catalog.activeFileId)
+            setUnitFiles(catalog.files)
+          }
           lastSavedRef.current = serialized
         })()
         pendingSaveRef.current = commit
@@ -2216,7 +2725,7 @@ function DocProductView(props: ProductViewProps) {
       const save = clientConnection.current.rpc.call(
         '/dsh-univer-create',
         'save',
-        { sessionId, unitType: 'doc', snapshot: nextSnapshot },
+        { sessionId, unitType: 'doc', snapshot: nextSnapshot, fileId: activeFileIdRef.current },
       ).then((result) => {
         if (result.ok) lastSavedRef.current = serialized
       }).catch((reason) => {
@@ -2267,7 +2776,7 @@ function DocProductView(props: ProductViewProps) {
         const fDocument = resident.univerAPI.getActiveDocument()
         if (fDocument === undefined || fDocument === null) return
         const snapshot = fDocument.save()
-        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'doc', snapshot })
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'doc', snapshot, fileId: activeFileIdRef.current })
       })
     }
     parkResidentRuntime(sessionId, 'doc', resident)
@@ -2283,20 +2792,116 @@ function DocProductView(props: ProductViewProps) {
     const result = await clientConnection.current.rpc.call(
       '/dsh-univer-create',
       'save',
-      { sessionId, unitType: 'doc', snapshot: nextSnapshot, filePath: nextFilePath },
+      { sessionId, unitType: 'doc', snapshot: nextSnapshot, filePath: nextFilePath, fileId: activeFileIdRef.current },
     )
     if (!result.ok) throw new Error(result.error.message)
     lastSavedRef.current = serialized
   }
 
+  const activateDocumentFile = async (targetFileId: string, target?: { snapshot: unknown; title: string; filePath: string | null }) => {
+    if (target === undefined && targetFileId === activeFileId) return
+    const previousSave = pendingSaveRef.current
+    let releaseSwitch!: () => void
+    const switchGate = new Promise<void>((resolve) => { releaseSwitch = resolve })
+    pendingSaveRef.current = switchGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const current = runtimeRef.current?.univerAPI.getActiveDocument()
+      if (current === null || current === undefined) throw new Error('当前文档在切换前已关闭')
+      const switched = await switchUnitFile(sessionId, 'doc', targetFileId, current.save(), target === undefined
+        ? { sourceFileId: activeFileIdRef.current }
+        : { title: target.title, filePath: target.filePath, targetSnapshot: target.snapshot, sourceFileId: activeFileIdRef.current })
+      disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      hydratedFromHostRef.current = true
+      lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+      lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+      activeFileIdRef.current = switched.activeFileId
+      nextRuntimeTitleRef.current = switched.title
+      setActiveFileId(switched.activeFileId)
+      setFilePath(switched.path)
+      setTitle(switched.title)
+      setSaveNotice('')
+      setHostSnapshot(switched.workbookSnapshot)
+      setUnitFiles((await loadUnitFiles(sessionId, 'doc')).files)
+      setLayoutVersion((value) => value + 1)
+    } finally {
+      releaseSwitch()
+      if (pendingSaveRef.current === switchGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
+  const closeCurrentDocument = async () => {
+    const currentDocument = runtimeRef.current?.univerAPI.getActiveDocument()
+    const fileId = activeFileIdRef.current
+    if (currentDocument === null || currentDocument === undefined || fileId === null) return
+    if (!confirmCloseFile(currentDocument.save(), lastFileSnapshotRef.current, filePath, ui.confirmCloseUnsaved)) return
+    const previousSave = pendingSaveRef.current
+    let releaseClose!: () => void
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    pendingSaveRef.current = closeGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const closed = await closeUnitFile(sessionId, 'doc', fileId)
+      disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      activeFileIdRef.current = closed.activeFileId
+      setActiveFileId(closed.activeFileId)
+      setUnitFiles(closed.files)
+      setFilePath(closed.path)
+      setSaveNotice('')
+      if (closed.activeFileId === null || closed.unitSnapshot === null) {
+        openedDocumentSessions.delete(sessionId)
+        setHostSnapshot(null)
+        setDocumentVisible(false)
+        setTitle(ui.defaultDocTitle)
+        lastSavedRef.current = null
+        lastFileSnapshotRef.current = null
+      } else {
+        openedDocumentSessions.add(sessionId)
+        nextRuntimeTitleRef.current = closed.title
+        setTitle(closed.title ?? ui.defaultDocTitle)
+        lastSavedRef.current = JSON.stringify(closed.unitSnapshot)
+        lastFileSnapshotRef.current = closed.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(closed.snapshot)
+        setHostSnapshot(closed.unitSnapshot)
+        setDocumentVisible(true)
+        setLayoutVersion((value) => value + 1)
+      }
+    } finally {
+      releaseClose()
+      if (pendingSaveRef.current === closeGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
   const newDocument = async () => {
     const document = runtimeRef.current?.univerAPI.getActiveDocument()
-    if (document !== undefined && document !== null && !confirmOpenWithUnsavedChanges(
-      document.save(),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChangesForNew,
-    )) return
     const blankSnapshot = documentData({ action: 'new-doc', seq: Date.now() }, locale, ui.defaultDocTitle)
+    if (document !== undefined && document !== null) {
+      try {
+        await activateDocumentFile(crypto.randomUUID(), { snapshot: blankSnapshot, title: ui.defaultDocTitle, filePath: null })
+      } catch (reason) {
+        setError(`切换文档文件失败：${reason instanceof Error ? reason.message : String(reason)}`)
+      }
+      return
+    }
     disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
     runtimeRef.current = null
     appliedRef.current.clear()
@@ -2311,6 +2916,11 @@ function DocProductView(props: ProductViewProps) {
     setHostSnapshot(blankSnapshot)
     try {
       await persistHostSnapshot(blankSnapshot, null)
+      const catalog = await loadUnitFiles(sessionId, 'doc')
+      activeFileIdRef.current = catalog.activeFileId
+      updateResidentFileId(sessionId, 'doc', catalog.activeFileId)
+      setActiveFileId(catalog.activeFileId)
+      setUnitFiles(catalog.files)
     } catch (reason) {
       setError(`保存到 Host 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     }
@@ -2321,6 +2931,13 @@ function DocProductView(props: ProductViewProps) {
     setError(null)
     try {
       const importedSnapshot = await importDocumentFromFile(file)
+      const importedPath = openedFilePath(file)
+      const importedTitle = typeof importedSnapshot.title === 'string' ? importedSnapshot.title : file.name.replace(/\\.[^.]+$/, '')
+      const current = runtimeRef.current?.univerAPI.getActiveDocument()
+      if (current !== undefined && current !== null) {
+        await activateDocumentFile(crypto.randomUUID(), { snapshot: importedSnapshot, title: importedTitle, filePath: importedPath })
+        return
+      }
       disposeResidentRuntime(sessionId, 'doc', runtimeRef.current)
       runtimeRef.current = null
       appliedRef.current.clear()
@@ -2329,11 +2946,15 @@ function DocProductView(props: ProductViewProps) {
       lastFileSnapshotRef.current = null
       openedDocumentSessions.add(sessionId)
       setHostSnapshot(importedSnapshot)
-      const importedPath = openedFilePath(file)
       setFilePath(importedPath)
       setSaveNotice('')
-      setTitle(typeof importedSnapshot.title === 'string' ? importedSnapshot.title : file.name.replace(/\\.[^.]+$/, ''))
+      setTitle(importedTitle)
       await persistHostSnapshot(importedSnapshot, importedPath)
+      const catalog = await loadUnitFiles(sessionId, 'doc')
+      activeFileIdRef.current = catalog.activeFileId
+      updateResidentFileId(sessionId, 'doc', catalog.activeFileId)
+      setActiveFileId(catalog.activeFileId)
+      setUnitFiles(catalog.files)
     } catch (reason) {
       setError(`导入 DOCX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -2342,12 +2963,6 @@ function DocProductView(props: ProductViewProps) {
   }
 
   const openDocumentFile = () => {
-    const document = runtimeRef.current?.univerAPI.getActiveDocument()
-    if (document !== undefined && document !== null && !confirmOpenWithUnsavedChanges(
-      document.save(),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChanges,
-    )) return
     fileInputRef.current?.click()
   }
 
@@ -2362,17 +2977,25 @@ function DocProductView(props: ProductViewProps) {
       setSaveDialogOpen(true)
       return
     }
+    const previousSave = pendingSaveRef.current
+    let releaseSave!: () => void
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
+    pendingSaveRef.current = saveGate
     setExporting(true)
     setError(null)
     setSaveNotice('')
+    savingRef.current = true
     try {
-      const nextSnapshot = fDocument.save()
+      await previousSave
+      const current = runtimeRef.current?.univerAPI.getActiveDocument()
+      if (current === undefined || current === null) throw new Error('当前文档在保存前已关闭')
+      const nextSnapshot = current.save()
       let savedPath: string
       try {
-        savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, chosenPath === undefined)
+        savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, chosenPath === undefined, activeFileIdRef.current)
       } catch (reason) {
         if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
-          savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, true)
+          savedPath = await saveUnitFile(sessionId, 'doc', nextSnapshot, targetPath, true, activeFileIdRef.current)
         } else {
           throw reason
         }
@@ -2385,16 +3008,21 @@ function DocProductView(props: ProductViewProps) {
     } catch (reason) {
       setError(`保存 DOCX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
+      releaseSave()
+      if (pendingSaveRef.current === saveGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
       setExporting(false)
     }
   }
 
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openDocumentFile}>
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={openDocumentFile}>
         {importing ? ui.opening : ui.open}
       </button>
-      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={newDocument}>
+      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={newDocument}>
         {ui.create}
       </button>
     </>
@@ -2409,17 +3037,30 @@ function DocProductView(props: ProductViewProps) {
       }} />
       {documentVisible && (
         <div className="dsh-univer-create-toolbar">
+          {unitFiles.length > 0 && <label className="dsh-univer-create-file-selector" title={ui.workbookFiles}>
+            <span className="dsh-univer-create-sr-only">{ui.workbookFiles}</span>
+            <select aria-label={ui.workbookFiles} value={activeFileId ?? ''} disabled={switchingFile || importing || exporting || operations.length > 0} onChange={(event) => {
+              const fileId = event.target.value
+              if (fileId.length > 0 && fileId !== activeFileId) void activateDocumentFile(fileId).catch((reason) => setError(`切换文档文件失败：${reason instanceof Error ? reason.message : String(reason)}`))
+            }}>
+              {unitFiles.map((file) => <option key={file.id} value={file.id}>{file.title}</option>)}
+            </select>
+          </label>}
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedDocOperations(operations.length) : ui.newFileHint)}
+            {switchingFile ? ui.switchingWorkbook : saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedDocOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
-          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void saveAsDocx()}>
+          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void closeCurrentDocument().catch((reason) => setError(`关闭文档文件失败：${reason instanceof Error ? reason.message : String(reason)}`))}>
+            {ui.close}
+          </button>
+          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void saveAsDocx()}>
             {exporting ? ui.saving : ui.save}
           </button>
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container" />
+      {switchingFile && <div className="dsh-univer-create-switch-blocker" aria-live="polite">{ui.switchingWorkbook}</div>}
       {saveDialogOpen && <SavePathDialog extension="docx" suggestedName={title} busy={exporting} onCancel={() => setSaveDialogOpen(false)} onSave={(path) => void saveAsDocx(path)} />}
       {hostLoaded && !documentVisible && <div className="dsh-univer-create-welcome" aria-label={ui.startDoc}>{actionButtons}</div>}
       {documentVisible && (
@@ -2562,6 +3203,11 @@ function SlideProductView(props: ProductViewProps) {
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [filePath, setFilePath] = useState<string | null>(null)
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
+  const activeFileIdRef = useRef<string | null>(null)
+  const nextRuntimeTitleRef = useRef<string | null>(null)
+  const [unitFiles, setUnitFiles] = useState<SheetFileMeta[]>([])
+  const [switchingFile, setSwitchingFile] = useState(false)
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const [presentationVisible, setPresentationVisible] = useState(() => openedPresentationSessions.has(sessionId))
@@ -2618,6 +3264,9 @@ function SlideProductView(props: ProductViewProps) {
     lastFileSnapshotRef.current = null
     setHostSnapshot(null)
     setFilePath(null)
+    activeFileIdRef.current = null
+    setActiveFileId(null)
+    setUnitFiles([])
     setSaveDialogOpen(false)
     setSaveNotice('')
     hydratedFromHostRef.current = false
@@ -2626,21 +3275,23 @@ function SlideProductView(props: ProductViewProps) {
     setHostLoaded(false)
     setPresentationVisible(runtimeRef.current !== null || openedPresentationSessions.has(sessionId))
     const restore = async () => {
-      const connection = clientConnection.current
-      if (connection === null) throw new Error('Host 连接不可用')
-      const [result, restoredFileState] = await Promise.all([
-        connection.rpc.call('/dsh-univer-create', 'load', { sessionId, unitType: 'slide' }),
-        loadUnitFileState(sessionId, 'slide'),
-      ])
+      const restored = await loadUnitState(sessionId, 'slide')
       if (cancelled) return
-      if (!result.ok) throw new Error(result.error.message)
-      if (result.value !== null && (typeof result.value !== 'object' || Array.isArray(result.value))) {
-        throw new Error('Host 返回了无效的演示文稿快照')
+      if (restored.unitSnapshot !== null && (typeof restored.unitSnapshot !== 'object' || Array.isArray(restored.unitSnapshot))) throw new Error('Host 返回了无效的演示文稿快照')
+      const resident = runtimeRef.current
+      const residentEntry = residentRuntimes.get(residentRuntimeKey(sessionId, 'slide'))
+      if (resident !== null && residentEntry?.fileId !== restored.activeFileId) {
+        disposeResidentRuntime(sessionId, 'slide', resident)
+        runtimeRef.current = null
       }
-      setFilePath(restoredFileState.path)
-      lastFileSnapshotRef.current = restoredFileState.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restoredFileState.snapshot)
-      if (result.value !== null) {
-        setHostSnapshot(result.value as ISlideData)
+      setFilePath(restored.path)
+      activeFileIdRef.current = restored.activeFileId
+      nextRuntimeTitleRef.current = restored.files.find((file) => file.id === restored.activeFileId)?.title ?? null
+      setActiveFileId(restored.activeFileId)
+      setUnitFiles(restored.files)
+      lastFileSnapshotRef.current = restored.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(restored.snapshot)
+      if (restored.unitSnapshot !== null) {
+        setHostSnapshot(restored.unitSnapshot as ISlideData)
       } else {
         openedPresentationSessions.delete(sessionId)
         setPresentationVisible(false)
@@ -2672,6 +3323,7 @@ function SlideProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
     }
     if (!hostLoaded) return
@@ -2717,10 +3369,13 @@ function SlideProductView(props: ProductViewProps) {
         pendingSaveRef,
         lastSavedRef,
         lastFileSnapshotRef,
+        activeFileIdRef,
       )
       openedPresentationSessions.add(sessionId)
       setPresentationVisible(true)
-      setTitle(operation?.title ?? restoredSnapshot?.name ?? ui.defaultSlideTitle)
+      const runtimeTitle = operation?.title ?? nextRuntimeTitleRef.current ?? restoredSnapshot?.name ?? ui.defaultSlideTitle
+      nextRuntimeTitleRef.current = null
+      setTitle(runtimeTitle)
 
       // Slides UI mounts the main render scene and each page thumbnail scene
       // asynchronously. Re-measure after both React and drawing resources settle,
@@ -2746,12 +3401,89 @@ function SlideProductView(props: ProductViewProps) {
       if (savingRef.current) return undefined
       for (const operation of operations) {
         if (appliedRef.current.has(operation.seq)) continue
+        if (operation.action === 'select-file') {
+          const current = runtimeRef.current?.presentation
+          if (current === undefined) throw new Error('当前没有可切换的演示文稿')
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const selection = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const presentation = runtimeRef.current?.presentation
+            if (presentation === undefined) throw new Error('当前演示文稿在切换前已关闭')
+            const switched = await switchUnitFile(sessionId, 'slide', operation.fileId, presentation.save(), { operationIds: [String(operation.seq)], sourceFileId: activeFileIdRef.current })
+            lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+            lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+            activeFileIdRef.current = switched.activeFileId
+            nextRuntimeTitleRef.current = switched.title
+            setActiveFileId(switched.activeFileId)
+            setFilePath(switched.path)
+            setTitle(switched.title)
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot as ISlideData)
+            createRuntime(undefined, switched.workbookSnapshot as ISlideData)
+            setUnitFiles((await loadUnitFiles(sessionId, 'slide')).files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = selection
+          void selection.catch((reason) => setError(`切换演示文稿文件失败：${reason instanceof Error ? reason.message : String(reason)}`)).finally(() => {
+            if (pendingSaveRef.current === selection) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
+        }
         if (operation.action === 'new-slide') {
-          createRuntime(operation)
-          setFilePath(null)
-          setSaveNotice('')
-          appliedRef.current.add(operation.seq)
-          continue
+          if (activeFileIdRef.current === null) {
+            createRuntime(operation)
+            setFilePath(null)
+            setSaveNotice('')
+            appliedRef.current.add(operation.seq)
+            continue
+          }
+          const previousSave = pendingSaveRef.current
+          setSaveDialogOpen(false)
+          setSwitchingFile(true)
+          savingRef.current = true
+          const creation = (async () => {
+            await previousSave
+            if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+            const current = runtimeRef.current?.presentation
+            if (current === undefined) throw new Error('当前演示文稿在新建前已关闭')
+            const blankSnapshot = presentationData(operation, locale, operation.title ?? ui.defaultSlideTitle)
+            const switched = await switchUnitFile(sessionId, 'slide', crypto.randomUUID(), current.save(), {
+              title: operation.title ?? ui.defaultSlideTitle,
+              filePath: null,
+              targetSnapshot: blankSnapshot,
+              operationIds: [String(operation.seq)],
+              sourceFileId: activeFileIdRef.current,
+            })
+            lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+            lastFileSnapshotRef.current = UNKNOWN_FILE_SNAPSHOT
+            activeFileIdRef.current = switched.activeFileId
+            nextRuntimeTitleRef.current = switched.title
+            setActiveFileId(switched.activeFileId)
+            setFilePath(null)
+            setTitle(switched.title)
+            setSaveNotice('')
+            setHostSnapshot(switched.workbookSnapshot as ISlideData)
+            createRuntime(undefined, switched.workbookSnapshot as ISlideData)
+            setUnitFiles((await loadUnitFiles(sessionId, 'slide')).files)
+            appliedRef.current.add(operation.seq)
+          })()
+          pendingSaveRef.current = creation
+          void creation.catch((reason) => setError(`新建演示文稿文件失败：${reason instanceof Error ? reason.message : String(reason)}`)).finally(() => {
+            if (pendingSaveRef.current === creation) {
+              pendingSaveRef.current = null
+              savingRef.current = false
+            }
+            setSwitchingFile(false)
+          })
+          return undefined
         }
         if (operation.action === 'list-slides') {
           appliedRef.current.add(operation.seq)
@@ -2892,6 +3624,13 @@ function SlideProductView(props: ProductViewProps) {
           const nextSnapshot = presentation.save()
           const serialized = JSON.stringify(nextSnapshot)
           await commitOperations(sessionId, 'slide', nextSnapshot, queuedIds)
+          if (activeFileIdRef.current === null) {
+            const catalog = await loadUnitFiles(sessionId, 'slide')
+            activeFileIdRef.current = catalog.activeFileId
+            updateResidentFileId(sessionId, 'slide', catalog.activeFileId)
+            setActiveFileId(catalog.activeFileId)
+            setUnitFiles(catalog.files)
+          }
           lastSavedRef.current = serialized
         })()
         pendingSaveRef.current = commit
@@ -2921,7 +3660,7 @@ function SlideProductView(props: ProductViewProps) {
       const save = clientConnection.current.rpc.call(
         '/dsh-univer-create',
         'save',
-        { sessionId, unitType: 'slide', snapshot: nextSnapshot },
+        { sessionId, unitType: 'slide', snapshot: nextSnapshot, fileId: activeFileIdRef.current },
       ).then((result) => {
         if (result.ok) lastSavedRef.current = serialized
       }).catch((reason) => {
@@ -2974,7 +3713,7 @@ function SlideProductView(props: ProductViewProps) {
     if (resident !== null && entry?.runtime === resident && connection !== null) {
       queueResidentFinalSave(entry, async () => {
         const snapshot = resident.presentation.save()
-        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot })
+        await connection.rpc.call('/dsh-univer-create', 'save', { sessionId, unitType: 'slide', snapshot, fileId: activeFileIdRef.current })
       })
     }
     slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
@@ -2992,13 +3731,114 @@ function SlideProductView(props: ProductViewProps) {
     const result = await clientConnection.current.rpc.call(
       '/dsh-univer-create',
       'save',
-      { sessionId, unitType: 'slide', snapshot: nextSnapshot, filePath: nextFilePath },
+      { sessionId, unitType: 'slide', snapshot: nextSnapshot, filePath: nextFilePath, fileId: activeFileIdRef.current },
     )
     if (!result.ok) throw new Error(result.error.message)
     lastSavedRef.current = serialized
   }
 
+  const activatePresentationFile = async (targetFileId: string, target?: { snapshot: ISlideData; title: string; filePath: string | null }) => {
+    if (target === undefined && targetFileId === activeFileId) return
+    const previousSave = pendingSaveRef.current
+    let releaseSwitch!: () => void
+    const switchGate = new Promise<void>((resolve) => { releaseSwitch = resolve })
+    pendingSaveRef.current = switchGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const presentation = runtimeRef.current?.presentation
+      if (presentation === undefined) throw new Error('当前演示文稿在切换前已关闭')
+      const switched = await switchUnitFile(sessionId, 'slide', targetFileId, presentation.save(), target === undefined
+        ? { sourceFileId: activeFileIdRef.current }
+        : { title: target.title, filePath: target.filePath, targetSnapshot: target.snapshot, sourceFileId: activeFileIdRef.current })
+      slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      slideResizeTimersRef.current = []
+      disposeResidentRuntime(sessionId, 'slide', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      hydratedFromHostRef.current = true
+      lastSavedRef.current = JSON.stringify(switched.workbookSnapshot)
+      lastFileSnapshotRef.current = switched.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(switched.snapshot)
+      activeFileIdRef.current = switched.activeFileId
+      nextRuntimeTitleRef.current = switched.title
+      setActiveFileId(switched.activeFileId)
+      setFilePath(switched.path)
+      setTitle(switched.title)
+      setSaveNotice('')
+      setHostSnapshot(switched.workbookSnapshot as ISlideData)
+      setUnitFiles((await loadUnitFiles(sessionId, 'slide')).files)
+      setLayoutVersion((value) => value + 1)
+    } finally {
+      releaseSwitch()
+      if (pendingSaveRef.current === switchGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
+  const closeCurrentPresentation = async () => {
+    const presentation = runtimeRef.current?.presentation
+    const fileId = activeFileIdRef.current
+    if (presentation === undefined || fileId === null) return
+    if (!confirmCloseFile(presentation.save(), lastFileSnapshotRef.current, filePath, ui.confirmCloseUnsaved)) return
+    const previousSave = pendingSaveRef.current
+    let releaseClose!: () => void
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    pendingSaveRef.current = closeGate
+    setSaveDialogOpen(false)
+    setSwitchingFile(true)
+    savingRef.current = true
+    try {
+      await previousSave
+      if (containerRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur()
+      const closed = await closeUnitFile(sessionId, 'slide', fileId)
+      slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      slideResizeTimersRef.current = []
+      disposeResidentRuntime(sessionId, 'slide', runtimeRef.current)
+      runtimeRef.current = null
+      appliedRef.current.clear()
+      activeFileIdRef.current = closed.activeFileId
+      setActiveFileId(closed.activeFileId)
+      setUnitFiles(closed.files)
+      setFilePath(closed.path)
+      setSaveNotice('')
+      if (closed.activeFileId === null || closed.unitSnapshot === null) {
+        openedPresentationSessions.delete(sessionId)
+        setHostSnapshot(null)
+        setPresentationVisible(false)
+        setTitle(ui.defaultSlideTitle)
+        lastSavedRef.current = null
+        lastFileSnapshotRef.current = null
+      } else {
+        openedPresentationSessions.add(sessionId)
+        nextRuntimeTitleRef.current = closed.title
+        setTitle(closed.title ?? ui.defaultSlideTitle)
+        lastSavedRef.current = JSON.stringify(closed.unitSnapshot)
+        lastFileSnapshotRef.current = closed.snapshot === null ? UNKNOWN_FILE_SNAPSHOT : JSON.stringify(closed.snapshot)
+        setHostSnapshot(closed.unitSnapshot as ISlideData)
+        setPresentationVisible(true)
+        setLayoutVersion((value) => value + 1)
+      }
+    } finally {
+      releaseClose()
+      if (pendingSaveRef.current === closeGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
+      setSwitchingFile(false)
+    }
+  }
+
   const replacePresentation = async (nextSnapshot: ISlideData, nextTitle: string, nextFilePath: string | null) => {
+    if (runtimeRef.current?.presentation !== undefined) {
+      await activatePresentationFile(crypto.randomUUID(), { snapshot: nextSnapshot, title: nextTitle, filePath: nextFilePath })
+      return
+    }
     slideResizeTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     slideResizeTimersRef.current = []
     disposeResidentRuntime(sessionId, 'slide', runtimeRef.current)
@@ -3014,15 +3854,14 @@ function SlideProductView(props: ProductViewProps) {
     setSaveNotice('')
     setHostSnapshot(nextSnapshot)
     await persistHostSnapshot(nextSnapshot, nextFilePath)
+    const catalog = await loadUnitFiles(sessionId, 'slide')
+    activeFileIdRef.current = catalog.activeFileId
+    updateResidentFileId(sessionId, 'slide', catalog.activeFileId)
+    setActiveFileId(catalog.activeFileId)
+    setUnitFiles(catalog.files)
   }
 
   const newPresentation = async () => {
-    const presentation = runtimeRef.current?.presentation
-    if (presentation !== undefined && !confirmOpenWithUnsavedChanges(
-      presentation.save(),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChangesForNew,
-    )) return
     const blankSnapshot = presentationData({ action: 'new-slide', seq: Date.now() }, locale, ui.defaultSlideTitle)
     try {
       await replacePresentation(blankSnapshot, ui.defaultSlideTitle, null)
@@ -3045,12 +3884,6 @@ function SlideProductView(props: ProductViewProps) {
   }
 
   const openPresentationFile = () => {
-    const presentation = runtimeRef.current?.presentation
-    if (presentation !== undefined && !confirmOpenWithUnsavedChanges(
-      presentation.save(),
-      lastFileSnapshotRef.current,
-      ui.confirmDiscardChanges,
-    )) return
     fileInputRef.current?.click()
   }
 
@@ -3065,17 +3898,25 @@ function SlideProductView(props: ProductViewProps) {
       setSaveDialogOpen(true)
       return
     }
+    const previousSave = pendingSaveRef.current
+    let releaseSave!: () => void
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
+    pendingSaveRef.current = saveGate
     setExporting(true)
     setError(null)
     setSaveNotice('')
+    savingRef.current = true
     try {
-      const nextSnapshot = presentation.save()
+      await previousSave
+      const current = runtimeRef.current?.presentation
+      if (current === undefined) throw new Error('当前演示文稿在保存前已关闭')
+      const nextSnapshot = current.save()
       let savedPath: string
       try {
-        savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, chosenPath === undefined)
+        savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, chosenPath === undefined, activeFileIdRef.current)
       } catch (reason) {
         if (chosenPath !== undefined && isWorkspaceFileExistsError(reason) && window.confirm(ui.confirmOverwrite(targetPath))) {
-          savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, true)
+          savedPath = await saveUnitFile(sessionId, 'slide', nextSnapshot, targetPath, true, activeFileIdRef.current)
         } else {
           throw reason
         }
@@ -3088,16 +3929,21 @@ function SlideProductView(props: ProductViewProps) {
     } catch (reason) {
       setError(`保存 PPTX 失败：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
+      releaseSave()
+      if (pendingSaveRef.current === saveGate) {
+        pendingSaveRef.current = null
+        savingRef.current = false
+      }
       setExporting(false)
     }
   }
 
   const actionButtons = (
     <>
-      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={openPresentationFile}>
+      <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={openPresentationFile}>
         {importing ? ui.opening : ui.open}
       </button>
-      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void newPresentation()}>
+      <button className="dsh-univer-create-action dsh-univer-create-action--primary" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void newPresentation()}>
         {ui.create}
       </button>
     </>
@@ -3112,17 +3958,30 @@ function SlideProductView(props: ProductViewProps) {
       }} />
       {presentationVisible && (
         <div className="dsh-univer-create-toolbar">
+          {unitFiles.length > 0 && <label className="dsh-univer-create-file-selector" title={ui.workbookFiles}>
+            <span className="dsh-univer-create-sr-only">{ui.workbookFiles}</span>
+            <select aria-label={ui.workbookFiles} value={activeFileId ?? ''} disabled={switchingFile || importing || exporting || operations.length > 0} onChange={(event) => {
+              const fileId = event.target.value
+              if (fileId.length > 0 && fileId !== activeFileId) void activatePresentationFile(fileId).catch((reason) => setError(`切换演示文稿文件失败：${reason instanceof Error ? reason.message : String(reason)}`))
+            }}>
+              {unitFiles.map((file) => <option key={file.id} value={file.id}>{file.title}</option>)}
+            </select>
+          </label>}
           <span className="dsh-univer-create-title">{title}</span>
           <span className="dsh-univer-create-status">
-            {saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSlideOperations(operations.length) : ui.newFileHint)}
+            {switchingFile ? ui.switchingWorkbook : saveNotice || (filePath !== null ? ui.fileStatus(filePath) : operations.length > 0 ? ui.syncedSlideOperations(operations.length) : ui.newFileHint)}
           </span>
           {actionButtons}
-          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || !hostLoaded} onClick={() => void saveAsPptx()}>
+          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void closeCurrentPresentation().catch((reason) => setError(`关闭演示文稿文件失败：${reason instanceof Error ? reason.message : String(reason)}`))}>
+            {ui.close}
+          </button>
+          <button className="dsh-univer-create-action" type="button" disabled={importing || exporting || switchingFile || !hostLoaded} onClick={() => void saveAsPptx()}>
             {exporting ? ui.saving : ui.save}
           </button>
         </div>
       )}
       <div ref={containerRef} className="dsh-univer-create-container dsh-univer-create-container--slides" />
+      {switchingFile && <div className="dsh-univer-create-switch-blocker" aria-live="polite">{ui.switchingWorkbook}</div>}
        
       {presentationVisible && (
          <aside className="dsh-univer-create-chat-overlay" aria-label={ui.chatActivity}>
