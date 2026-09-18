@@ -98,6 +98,34 @@
   font-size: 13px;
 }
 
+.dsh-univer-create-file-selector {
+  flex: 0 1 190px;
+  min-width: 110px;
+}
+
+.dsh-univer-create-file-selector select {
+  width: 100%;
+  padding: 5px 24px 5px 8px;
+  color: var(--dsw-alias-content-primary, #172033);
+  background: var(--dsw-alias-bg-base, #fff);
+  border: 1px solid var(--dsw-alias-border-subtle, #cbd5e1);
+  border-radius: 5px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.dsh-univer-create-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .dsh-univer-create-title {
   overflow: hidden;
   font-weight: 600;
@@ -117,6 +145,20 @@
 
 .dsh-univer-create-file-input {
   display: none;
+}
+
+.dsh-univer-create-switch-blocker {
+  position: absolute;
+  z-index: 100;
+  inset: 42px 0 0;
+  display: grid;
+  place-items: center;
+  color: var(--dsw-alias-content-secondary, #64748b);
+  background: rgb(255 255 255 / 55%);
+  backdrop-filter: blur(1px);
+  cursor: wait;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .dsh-univer-create-action {

@@ -12,6 +12,10 @@ type UniverCreateMessages = {
   open: string
   opening: string
   create: string
+  close: string
+  confirmCloseUnsaved: string
+  workbookFiles: string
+  switchingWorkbook: string
   chatActivity: string
   closeChatActivity: string
   openChatActivity: string
@@ -53,6 +57,10 @@ const en: UniverCreateMessages = {
   open: 'Open',
   opening: 'Opening…',
   create: 'New',
+  close: 'Close',
+  confirmCloseUnsaved: 'The current file has unsaved changes. Close it and discard those changes?',
+  workbookFiles: 'Open files',
+  switchingWorkbook: 'Switching…',
   chatActivity: 'Conversation activity',
   closeChatActivity: 'Close conversation activity',
   openChatActivity: 'Open conversation activity',
@@ -94,6 +102,10 @@ const zh: UniverCreateMessages = {
   open: '打开',
   opening: '打开中…',
   create: '新建',
+  close: '关闭',
+  confirmCloseUnsaved: '当前文件有尚未保存的修改，确定关闭并放弃这些修改吗？',
+  workbookFiles: '已打开的文件',
+  switchingWorkbook: '切换中…',
   chatActivity: '对话动态',
   closeChatActivity: '关闭对话动态',
   openChatActivity: '打开对话动态',
