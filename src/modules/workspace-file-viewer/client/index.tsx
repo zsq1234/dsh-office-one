@@ -150,6 +150,7 @@ function trimSheetFrameCache(): void {
 
 type OfficePayload = {
   modified?: string
+  version?: string
   workbook?: unknown
   document?: unknown
   presentation?: unknown
@@ -204,6 +205,51 @@ function updateOfficePayload(key: string, value: OfficePayload): void {
   const entry: OfficePayloadCacheEntry = { sourceRef, value, promise: Promise.resolve(value), lastUsed: Date.now() }
   officePayloadCache.set(key, entry)
   trimOfficePayloadCache()
+}
+
+// DSH re-issues the preview content object on every auto-refresh. Keep the
+// cached conversion attached to that object so a self-save does not trigger a
+// second conversion of the file this page just wrote.
+function retainOfficePayloadSource(key: string, source: object): void {
+  const entry = officePayloadCache.get(key)
+  if (entry !== undefined) entry.sourceRef = new WeakRef(source)
+}
+
+type OfficeFileMeta = { modified?: string; version?: string; size?: number }
+
+type OfficeRefreshDecision = 'keep' | 'reuse' | 'reload'
+
+/**
+ * Decide what an auto-refresh (or remount) of one Office preview should do.
+ * `keep` is the self-save case: the file on disk is exactly the version the
+ * mounted editor already shows, so remounting or re-importing it would only
+ * flash the editor away. `reuse` serves a conversion cached for that version.
+ */
+function decideOfficeRefresh(input: {
+  alreadyMounted: boolean
+  loadedVersion: string
+  loadedModified: string
+  meta: OfficeFileMeta | null
+  cachedVersion?: string
+}): OfficeRefreshDecision {
+  const { alreadyMounted, loadedVersion, loadedModified, meta, cachedVersion } = input
+  if (alreadyMounted && meta !== null
+    && (meta.version === loadedVersion || (meta.modified !== undefined && meta.modified === loadedModified))) {
+    return 'keep'
+  }
+  if (meta !== null && cachedVersion !== undefined && cachedVersion === meta.version) return 'reuse'
+  return 'reload'
+}
+
+async function fetchOfficeFileMeta(sessionId: string, path: string, signal: AbortSignal): Promise<OfficeFileMeta | null> {
+  try {
+    const response = await fetch(`/api/workspace-office-meta?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`, { signal })
+    if (!response.ok) return null
+    const payload = await response.json() as OfficeFileMeta
+    return typeof payload?.version === 'string' ? payload : null
+  } catch {
+    return null
+  }
 }
 
 function createSheetFrame(
@@ -900,6 +946,24 @@ function normalizeDocumentSnapshot(value: unknown): unknown {
   return snapshot
 }
 
+// A successful in-place save advances the live frame's version before React
+// receives the new mtime. Keep its mount identity in that case; only an actual
+// external version change should detach/rebuild the editor iframe.
+function useFrameSourceBoundary(runtimeKey: string, sourceModified: string) {
+  const mounted = useRef<{
+    runtimeKey: string
+    boundary: object
+    entry: { sourceModified: string; disposed: boolean }
+  } | null>(null)
+  const boundary = useMemo(() => {
+    const current = mounted.current
+    return current?.runtimeKey === runtimeKey && !current.entry.disposed && current.entry.sourceModified === sourceModified
+      ? current.boundary
+      : {}
+  }, [runtimeKey, sourceModified])
+  return { mounted, boundary }
+}
+
 function UniverWorkbook({
   runtimeKey,
   sourceModified,
@@ -922,6 +986,7 @@ function UniverWorkbook({
   editingDisabled?: boolean
 }) {
   const language = useDshLanguage()
+  const { mounted, boundary } = useFrameSourceBoundary(runtimeKey, sourceModified)
   const containerRef = useRef<HTMLDivElement>(null)
   const onDraftMutationRef = useRef(onDraftMutation)
   const onDraftRestoredRef = useRef(onDraftRestored)
@@ -979,6 +1044,7 @@ function UniverWorkbook({
       language,
     )
     const reused = cached !== undefined
+    mounted.current = { runtimeKey, boundary, entry }
     entry.owner = owner
     entry.onMutation = (mutation) => onDraftMutationRef.current?.(mutation)
     entry.lastUsed = Date.now()
@@ -1024,7 +1090,7 @@ function UniverWorkbook({
       }
       trimSheetFrameCache()
     }
-  }, [runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef, language])
+  }, [runtimeKey, boundary, snapshot, layoutVersion, snapshotProviderRef, language])
 
   return <div ref={containerRef} className="dsh-wfv-univer" aria-label="电子表格 Univer 预览" />
 }
@@ -1045,6 +1111,7 @@ function CachedOfficeUnit({
   editingDisabled?: boolean
 }) {
   const language = useDshLanguage()
+  const { mounted, boundary } = useFrameSourceBoundary(runtimeKey, sourceModified)
   const containerRef = useRef<HTMLDivElement>(null)
   const retryCountRef = useRef(0)
   const [layoutVersion, setLayoutVersion] = useState(0)
@@ -1115,6 +1182,7 @@ function CachedOfficeUnit({
       language,
     )
     const reused = cached !== undefined
+    mounted.current = { runtimeKey, boundary, entry }
     entry.owner = owner
     entry.lastUsed = Date.now()
     entry.iframe.inert = true
@@ -1173,7 +1241,7 @@ function CachedOfficeUnit({
       }
       trimOfficeFrameCache(kind)
     }
-  }, [kind, runtimeKey, sourceModified, snapshot, layoutVersion, snapshotProviderRef, language])
+  }, [kind, runtimeKey, boundary, snapshot, layoutVersion, snapshotProviderRef, language])
 
   const className = kind === 'docs' ? 'dsh-wfv-univer-doc' : 'dsh-wfv-univer-slides'
   const label = kind === 'docs' ? 'DOC Univer 预览' : 'PPT Univer 预览'
@@ -1593,13 +1661,22 @@ function FileBrowser({ sessionId }: FileBrowserProps) {
   )
 }
 
+type RendererPreviewContent = {
+  readonly kind: 'renderer'
+  readonly revision: number
+  readonly reload: () => void
+  readonly failed: () => void
+  readonly loaded: (version: string) => void
+}
+
 type DocumentPreviewContent =
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> }
+  | RendererPreviewContent
 
 type OfficePreviewProps = {
   readonly resourceAddress: string
-  readonly content: DocumentPreviewContent
+  readonly content: DocumentPreviewContent | undefined
   readonly scrollportRef: React.RefCallback<HTMLElement>
 }
 
@@ -1632,73 +1709,149 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
   const [documentData, setDocumentData] = useState<unknown>(null)
   const [slidesData, setSlidesData] = useState<unknown>(null)
   const [loadedModified, setLoadedModified] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
   const snapshotProviderRef = useRef<(() => unknown) | null>(null)
   const requestVersionRef = useRef(0)
   const workbookDraft = useWorkbookDraftManager()
+  const loadedModifiedRef = useRef('')
+  const loadedVersionRef = useRef('')
+  const rendererContentRef = useRef<RendererPreviewContent | null>(null)
+  const previewSessionRef = useRef<{ key: string | null; revision: number | null }>({ key: null, revision: null })
+  const savingRef = useRef(0)
+  const editorLoadedRef = useRef(false)
+  const skippedRevisionRef = useRef<number | null>(null)
+  const [revisionTick, setRevisionTick] = useState(0)
+  const rendererContent = content?.kind === 'renderer' ? content : null
+  rendererContentRef.current = rendererContent
+  const rendererRevision = rendererContent?.revision ?? null
+
+  const syncRendererVersion = useCallback((version: string) => {
+    if (version.length === 0) return
+    rendererContentRef.current?.loaded(version)
+  }, [])
 
   useEffect(() => {
-    workbookDraft.reset()
-    setWorkbook(null)
-    setDocumentData(null)
-    setSlidesData(null)
-    setLoadedModified('')
-    setError('')
-    setSaveStatus('')
-    setSaving(false)
-    snapshotProviderRef.current = null
-    const requestVersion = ++requestVersionRef.current
-    if (content.kind !== 'bytes' || file === null) return
+    const fileKey = file === null ? null : `${file.sessionId}\u0000${file.path}`
+    const session = previewSessionRef.current
+    if (session.key !== fileKey) {
+      session.key = fileKey
+      session.revision = null
+      workbookDraft.reset()
+      setWorkbook(null)
+      setDocumentData(null)
+      setSlidesData(null)
+      loadedModifiedRef.current = ''
+      loadedVersionRef.current = ''
+      setLoadedModified('')
+      setError('')
+      setSaveStatus('')
+      setSaving(false)
+      editorLoadedRef.current = false
+      snapshotProviderRef.current = null
+    }
+    if (file === null || rendererRevision === null) return
+    if (session.revision === rendererRevision) return
+    session.revision = rendererRevision
+    // DSH's auto-refresh may race the save response. The save completion syncs
+    // the renderer with the version it wrote, so this revision is covered.
+    if (savingRef.current > 0) {
+      skippedRevisionRef.current = rendererRevision
+      return
+    }
+    const renderer = rendererContentRef.current
+    if (renderer === null || renderer.revision !== rendererRevision) return
 
     const controller = new AbortController()
+    const requestVersion = ++requestVersionRef.current
     const isWorkbook = workbookFormat(file.path) !== null
     const isDocument = /\.(doc|docx)$/i.test(file.path)
+    const runtimeKey = `${file.sessionId}\u0000${file.path}`
+    const kind: CachedOfficeKind = isDocument ? 'docs' : 'slides'
     const endpoint = isWorkbook ? 'workspace-xlsx' : isDocument ? 'workspace-doc' : 'workspace-slides'
-    const previousPayload = officePayloadCache.get(resourceAddress)
-    if (previousPayload && previousPayload.sourceRef?.deref() !== content.data) {
-      const runtimeKey = `${file.sessionId}\u0000${file.path}`
-      if (isWorkbook) {
-        const staleRuntime = sheetFrameCache.get(runtimeKey)
-        if (staleRuntime?.owner === null) disposeSheetFrame(staleRuntime)
-      } else {
-        const kind: CachedOfficeKind = isDocument ? 'docs' : 'slides'
-        const staleRuntime = officeFrameCaches[kind].get(runtimeKey)
-        if (staleRuntime?.owner === null) disposeOfficeFrame(staleRuntime, false)
-        officeResumeSnapshots[kind].delete(runtimeKey)
-      }
+    const rendererForRevision = renderer
+    const live = () => !controller.signal.aborted && requestVersionRef.current === requestVersion
+    const syncRenderer = (version: string) => {
+      if (!live() || typeof version !== 'string' || version.length === 0) return
+      const current = rendererContentRef.current
+      if (current !== null && current.revision === rendererForRevision.revision) current.loaded(version)
     }
-    const payloadEntry = loadOfficePayload(resourceAddress, content.data, async () => {
-      const response = await fetch(`/api/${endpoint}?sessionId=${encodeURIComponent(file.sessionId)}&path=${encodeURIComponent(file.path)}`)
-      const payload = await response.json()
-      if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
-      return payload as OfficePayload
-    })
-    setLoading(payloadEntry.value === undefined)
+
+    const apply = async (payload: OfficePayload) => {
+      if (!live()) return
+      loadedModifiedRef.current = payload.modified || ''
+      setLoadedModified(payload.modified || '')
+      setError('')
+      if (isWorkbook) {
+        const restored = await workbookDraft.restore(file.sessionId, file.path, payload.modified || '')
+        if (!live()) return
+        if (restored === null) throw new Error('表格当前无法安全打开，请查看草稿状态提示')
+        setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
+      } else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
+      else setSlidesData(payload.presentation)
+      editorLoadedRef.current = true
+      if (typeof payload.version === 'string') loadedVersionRef.current = payload.version
+      syncRenderer(payload.version ?? '')
+    }
+
     void (async () => {
+      const alreadyMounted = editorLoadedRef.current && loadedVersionRef.current.length > 0
+      let refreshed = false
       try {
+        const meta = await fetchOfficeFileMeta(file.sessionId, file.path, controller.signal)
+        if (!live()) return
+        const cached = officePayloadCache.get(resourceAddress)?.value
+        const decision = decideOfficeRefresh({
+          alreadyMounted,
+          loadedVersion: loadedVersionRef.current,
+          loadedModified: loadedModifiedRef.current,
+          meta,
+          cachedVersion: cached?.version,
+        })
+        if (decision === 'keep' && meta !== null && typeof meta.version === 'string') {
+          // The on-disk version is exactly what this preview already shows:
+          // either our own save or a refresh of unchanged content.
+          loadedVersionRef.current = meta.version
+          syncRenderer(meta.version)
+          return
+        }
+        // Reuse the conversion of this exact version instead of re-importing
+        // the file, for example after switching tabs and coming back.
+        if (decision === 'reuse' && cached !== undefined) {
+          retainOfficePayloadSource(resourceAddress, rendererForRevision)
+          await apply(cached)
+          return
+        }
+        if (cached !== undefined) officePayloadCache.delete(resourceAddress)
+        refreshed = alreadyMounted
+        if (refreshed) setSaveStatus('检测到文件已更新，正在重新加载…')
+        else setLoading(true)
+        const payloadEntry = loadOfficePayload(resourceAddress, rendererForRevision, async () => {
+          const response = await fetch(`/api/${endpoint}?sessionId=${encodeURIComponent(file.sessionId)}&path=${encodeURIComponent(file.path)}`)
+          const payload = await response.json()
+          if (!response.ok) throw new Error(payload.error || '读取 Office 文件失败')
+          return payload as OfficePayload
+        })
         const payload = payloadEntry.value ?? await payloadEntry.promise
-        if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
-        setLoadedModified(payload.modified || '')
-        if (isWorkbook) {
-          const restored = await workbookDraft.restore(file.sessionId, file.path, payload.modified || '')
-          if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return
-          if (restored === null) throw new Error('表格当前无法安全打开，请查看草稿状态提示')
-          setWorkbook(normalizeWorkbookSnapshot(payload.workbook))
-        } else if (isDocument) setDocumentData(normalizeDocumentSnapshot(payload.document))
-        else setSlidesData(payload.presentation)
+        if (!live()) return
+        retainOfficePayloadSource(resourceAddress, rendererForRevision)
+        await apply(payload)
+        if (refreshed && live()) setSaveStatus(`已重新加载 ${file.path}`)
       } catch (reason) {
-        if (!controller.signal.aborted && requestVersionRef.current === requestVersion) {
-          setError(reason instanceof Error ? reason.message : String(reason))
+        if (live()) {
+          const message = reason instanceof Error ? reason.message : String(reason)
+          if (refreshed) setSaveStatus(`重新加载失败：${message}`)
+          else setError(message)
+          if (rendererContentRef.current?.revision === rendererForRevision.revision) rendererForRevision.failed()
         }
       } finally {
-        if (requestVersionRef.current === requestVersion) setLoading(false)
+        if (live()) setLoading(false)
       }
     })()
     return () => controller.abort()
-  }, [content, file])
+  }, [file, rendererRevision, revisionTick])
 
   const saveOfficeFile = async () => {
     if (file === null) return
@@ -1714,9 +1867,11 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
     }
 
     const requestVersion = ++requestVersionRef.current
+    savingRef.current += 1
     setSaving(true)
     setSaveStatus('')
     let sheetSavePrepared = false
+    let succeeded = false
     try {
       const preparedDraft = target.unitType === 'sheet' ? await workbookDraft.prepareSave() : null
       sheetSavePrepared = preparedDraft !== null
@@ -1728,7 +1883,7 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
           path: file.path,
           unitType: target.unitType,
           format: target.format,
-          expectedModified: loadedModified,
+          expectedModified: loadedModifiedRef.current,
           data: snapshot,
         }),
       })
@@ -1736,17 +1891,19 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
       if (!response.ok) throw new Error(payload.error || '保存失败')
       const savedAsNewFile = payload.path !== file.path
       const runtimeKey = `${file.sessionId}\u0000${file.path}`
+      const previousModified = loadedModifiedRef.current
       if (target.unitType === 'sheet') {
         await workbookDraft.commitSaved(preparedDraft, payload.modified || '')
-        if (!savedAsNewFile) advanceSheetFrameVersion(runtimeKey, loadedModified, payload.modified || '')
+        if (!savedAsNewFile) advanceSheetFrameVersion(runtimeKey, previousModified, payload.modified || '')
       } else {
         const kind: CachedOfficeKind = target.unitType === 'doc' ? 'docs' : 'slides'
-        if (!savedAsNewFile) advanceOfficeProviderVersion(getSnapshot, loadedModified, payload.modified || '')
+        if (!savedAsNewFile) advanceOfficeProviderVersion(getSnapshot, previousModified, payload.modified || '')
         officeResumeSnapshots[kind].delete(runtimeKey)
       }
       if (!savedAsNewFile) {
         updateOfficePayload(resourceAddress, {
           modified: payload.modified || '',
+          ...(typeof payload.version === 'string' ? { version: payload.version } : {}),
           ...(target.unitType === 'sheet' ? { workbook: snapshot } : target.unitType === 'doc' ? { document: snapshot } : { presentation: snapshot }),
         })
       } else if (target.unitType === 'sheet') {
@@ -1758,19 +1915,34 @@ function OfficePreview({ resourceAddress, content, scrollportRef }: OfficePrevie
         const oldRuntime = officeFrameBySnapshotProvider.get(getSnapshot)
         if (oldRuntime) disposeOfficeFrame(oldRuntime, false)
       }
+      succeeded = true
       if (requestVersionRef.current === requestVersion) {
         if (savedAsNewFile) {
           setWorkbook(null)
           setSaveStatus(`已另存为 ${payload.path}；请从 Workspace 打开新文件继续编辑`)
         } else {
           setSaveStatus(`已保存 ${payload.path}`)
+          loadedModifiedRef.current = payload.modified || ''
+          if (typeof payload.version === 'string') loadedVersionRef.current = payload.version
           setLoadedModified(payload.modified || '')
+          syncRendererVersion(typeof payload.version === 'string' ? payload.version : '')
         }
       }
     } catch (reason) {
       if (requestVersionRef.current === requestVersion) setSaveStatus(reason instanceof Error ? reason.message : String(reason))
     } finally {
       if (sheetSavePrepared) workbookDraft.finishSave()
+      savingRef.current = Math.max(0, savingRef.current - 1)
+      if (savingRef.current === 0) {
+        const skipped = skippedRevisionRef.current
+        skippedRevisionRef.current = null
+        // Re-check a watcher revision that arrived mid-save: it may describe an
+        // external change made after our write, not the write itself.
+        if (skipped !== null && succeeded) {
+          previewSessionRef.current.revision = null
+          setRevisionTick((value) => value + 1)
+        }
+      }
       if (requestVersionRef.current === requestVersion) setSaving(false)
     }
   }
@@ -1830,7 +2002,7 @@ export function apply(ctx: any): void {
     extensions: OFFICE_EXTENSIONS,
     priority: 'extension',
     title: () => 'Office (Univer)',
-    loading: 'bytes-complete',
+    loading: 'renderer',
     wrap: false,
   }), 'dsh-office-one: Office preview metadata')
   ctx.effect(() => ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register({

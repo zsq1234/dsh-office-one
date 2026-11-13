@@ -3,7 +3,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "
 import { randomUUID } from "node:crypto";
 
 const name = "workspace-file-viewer";
-const inject = ["webServer", "workspaceRegistry"];
+const inject = ["webServer", "sessionPersistence", "fs"];
 const IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 500;
@@ -43,6 +43,20 @@ function decodeDirectoryCursor(cursor) {
 }
 function encodeDirectoryCursor(entry) {
   return Buffer.from(JSON.stringify([directoryEntryRank(entry), entry.name])).toString("base64url");
+}
+
+/**
+ * The freshness token DSH's own workspace-file service reports for a file.
+ * The document preview compares it with the version this plugin loaded, so
+ * both sides must come from the same `ctx.fs` provider.
+ */
+async function fsVersion(fs, root, absolute) {
+  const rootTarget = await fs.resolve(root);
+  const target = await fs.resolve(absolute);
+  if (!fs.contains(rootTarget, target)) throw new Error("path must stay inside the workspace");
+  const info = await fs.stat(target);
+  if (info === undefined || info.type !== "file") throw new Error("not a file");
+  return String(info.version);
 }
 
 async function listDirectory(root, inputPath = "", cursor = "", requestedLimit = "") {
@@ -150,7 +164,7 @@ async function exportOfficeFile(data, unitType, format) {
   return output;
 }
 
-async function saveOfficeFile(root, payload) {
+async function saveOfficeFile(root, payload, fs) {
   const path = typeof payload?.path === "string" ? payload.path : "";
   const unitType = typeof payload?.unitType === "string" ? payload.unitType : "";
   const format = typeof payload?.format === "string" ? payload.format.toLowerCase() : "";
@@ -198,18 +212,29 @@ async function saveOfficeFile(root, payload) {
     throw error;
   }
   const saved = await stat(target);
-  return { path: relative(root, target).split(sep).join("/"), size: output.byteLength, modified: saved.mtime.toISOString() };
+  return {
+    path: relative(root, target).split(sep).join("/"),
+    size: output.byteLength,
+    modified: saved.mtime.toISOString(),
+    version: await fsVersion(fs, root, target),
+  };
 }
 
 function json(res, status, payload) { res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); res.end(JSON.stringify(payload)); }
-function sessionRoot(registry, sessionId) { if (!sessionId) throw new Error("sessionId is required"); const root = registry.host.sessionPath(sessionId); if (!root) throw new Error("cannot resolve the workspace directory for this session"); return root; }
-async function handleFiles(req, res, registry) {
+async function sessionRoot(persistence, sessionId) {
+  if (!sessionId) throw new Error("sessionId is required");
+  const root = (await persistence.stat(sessionId))?.header.cwd;
+  if (typeof root !== "string" || !isAbsolute(root)) throw new Error("cannot resolve the workspace directory for this session");
+  return root;
+}
+async function handleFiles(req, res, services) {
+  const { sessionPersistence, fs } = services;
   try {
     const url = new URL(req.url ?? "/", "http://localhost");
-    const root = sessionRoot(registry, url.searchParams.get("sessionId"));
+    const root = await sessionRoot(sessionPersistence, url.searchParams.get("sessionId"));
     if (url.pathname === "/api/workspace-office-save") {
       if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
-      const result = await saveOfficeFile(root, await readJsonBody(req));
+      const result = await saveOfficeFile(root, await readJsonBody(req), fs);
       return json(res, 200, result);
     }
     if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
@@ -221,6 +246,18 @@ async function handleFiles(req, res, registry) {
         url.searchParams.get("limit") ?? "",
       );
       return json(res, 200, page);
+    }
+    if (url.pathname === "/api/workspace-office-meta") {
+      const path = url.searchParams.get("path") ?? "";
+      const absolute = await safePath(root, path);
+      const info = await stat(absolute);
+      if (!info.isFile()) throw new Error("not a file");
+      return json(res, 200, {
+        path,
+        modified: info.mtime.toISOString(),
+        size: info.size,
+        version: await fsVersion(fs, root, absolute),
+      });
     }
     if (url.pathname === "/api/workspace-file") {
       const absolute = await safePath(root, url.searchParams.get("path") ?? ""); const info = await stat(absolute);
@@ -234,23 +271,46 @@ async function handleFiles(req, res, registry) {
       const path = url.searchParams.get("path") ?? ""; if (!/\.(xls|xlsx|csv)$/i.test(path)) throw new Error("only .xls, .xlsx, and .csv files are supported");
       const absolute = await safePath(root, path); const info = await stat(absolute); if (!info.isFile()) throw new Error("not a file");
       if (info.size > MAX_FILE_BYTES) return json(res, 413, { error: "workbook is larger than 300 MiB" });
-      return json(res, 200, { path, modified: info.mtime.toISOString(), workbook: await readXlsx(absolute) });
+      return json(res, 200, { path, modified: info.mtime.toISOString(), version: await fsVersion(fs, root, absolute), workbook: await readXlsx(absolute) });
     }
     if (url.pathname === "/api/workspace-doc") {
       const path = url.searchParams.get("path") ?? ""; if (!/\.(doc|docx)$/i.test(path)) throw new Error("only .doc and .docx files are supported");
       const absolute = await safePath(root, path); const info = await stat(absolute); if (!info.isFile()) throw new Error("not a file");
       if (info.size > MAX_FILE_BYTES) return json(res, 413, { error: "document is larger than 300 MiB" });
-      return json(res, 200, { path, modified: info.mtime.toISOString(), document: await readDoc(absolute) });
+      return json(res, 200, { path, modified: info.mtime.toISOString(), version: await fsVersion(fs, root, absolute), document: await readDoc(absolute) });
     }
     if (url.pathname === "/api/workspace-slides") {
       const path = url.searchParams.get("path") ?? ""; if (!/\.(ppt|pptx)$/i.test(path)) throw new Error("only .ppt and .pptx files are supported");
       const absolute = await safePath(root, path); const info = await stat(absolute); if (!info.isFile()) throw new Error("not a file");
       if (info.size > MAX_FILE_BYTES) return json(res, 413, { error: "presentation is larger than 300 MiB" });
-      return json(res, 200, { path, modified: info.mtime.toISOString(), presentation: await readSlides(absolute) });
+      return json(res, 200, { path, modified: info.mtime.toISOString(), version: await fsVersion(fs, root, absolute), presentation: await readSlides(absolute) });
     }
     return json(res, 404, { error: "not found" });
   } catch (error) { return json(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
 }
 async function handleRuntime(req, res) { const kind = new URL(req.url ?? '/', 'http://localhost').pathname.split('/').pop(); if (kind !== 'sheet.js' && kind !== 'docs.js' && kind !== 'slides.js') return json(res, 404, { error: 'not found' }); try { const body = await readRuntimeFile(resolve(RUNTIME_DIR, 'runtimes', kind)); res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' }); res.end(body); } catch { json(res, 404, { error: 'runtime not built' }); } }
-function apply(ctx) { const handler = (req, res) => handleFiles(req, res, ctx.workspaceRegistry); const runtimeHandler = (req, res) => handleRuntime(req, res); ctx.effect(() => { const a = ctx.webServer.register({ kind: "exact", path: "/api/workspace-files", handler }); const b = ctx.webServer.register({ kind: "exact", path: "/api/workspace-file", handler }); const c = ctx.webServer.register({ kind: "exact", path: "/api/workspace-xlsx", handler }); const d = ctx.webServer.register({ kind: "exact", path: "/api/workspace-doc", handler }); const e = ctx.webServer.register({ kind: "exact", path: "/api/workspace-slides", handler }); const s = ctx.webServer.register({ kind: "exact", path: "/api/workspace-office-save", handler }); const rs = ctx.webServer.register({ kind: "exact", path: "/api/workspace-file-viewer/runtime/docs.js", handler: runtimeHandler }); const rt = ctx.webServer.register({ kind: "exact", path: "/api/workspace-file-viewer/runtime/sheet.js", handler: runtimeHandler }); const rv = ctx.webServer.register({ kind: "exact", path: "/api/workspace-file-viewer/runtime/slides.js", handler: runtimeHandler }); return () => { a(); b(); c(); d(); e(); s(); rs(); rt(); rv(); }; }, "workspace-file-viewer: api"); }
+function apply(ctx) {
+  const services = { sessionPersistence: ctx.sessionPersistence, fs: ctx.fs };
+  const handler = (req, res) => handleFiles(req, res, services);
+  const runtimeHandler = (req, res) => handleRuntime(req, res);
+  ctx.effect(() => {
+    const routes = [
+      "/api/workspace-files",
+      "/api/workspace-file",
+      "/api/workspace-office-meta",
+      "/api/workspace-xlsx",
+      "/api/workspace-doc",
+      "/api/workspace-slides",
+      "/api/workspace-office-save",
+    ].map((path) => ctx.webServer.register({ kind: "exact", path, handler }));
+    const runtimeRoutes = [
+      "/api/workspace-file-viewer/runtime/docs.js",
+      "/api/workspace-file-viewer/runtime/sheet.js",
+      "/api/workspace-file-viewer/runtime/slides.js",
+    ].map((path) => ctx.webServer.register({ kind: "exact", path, handler: runtimeHandler }));
+    return () => {
+      for (const unregister of [...routes, ...runtimeRoutes]) unregister();
+    };
+  }, "workspace-file-viewer: api");
+}
 export { apply, inject, name, readDoc, readXlsx };
