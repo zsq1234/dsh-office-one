@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { normalizeSlides } from '../../../server/normalize-slides.mjs'
 
 export const name = 'dsh-univer-create'
-export const inject = ['tools', 'connection', 'storageDomain', 'workspaceRegistry', 'attachments']
+export const inject = ['tools', 'connection', 'storageDomain', 'sessionPersistence', 'attachments']
 
 const queuedSheetOperationSchema = z.object({
   id: z.string(),
@@ -382,8 +382,8 @@ const UNIVER_EXPORT_ENDPOINT = process.env.UNIVER_FILE_EXPORT_ENDPOINT ?? 'http:
 const MAX_EXPORT_BYTES = 300 * 1024 * 1024
 const FILE_FORMATS = { sheet: 'xlsx', doc: 'docx', slide: 'pptx' } as const
 
-interface WorkspaceRegistryLike {
-  host: { sessionPath(sessionId: string): string | null | undefined }
+interface SessionPersistenceLike {
+  stat(sessionId: string): Promise<{ header: { cwd?: string } } | undefined>
 }
 
 function isInside(root: string, candidate: string): boolean {
@@ -460,7 +460,7 @@ async function saveExportedFile(root: string, filePath: string, unitType: keyof 
 }
 
 export function apply(ctx: Context): void {
-  const services = ctx as Context & { workspaceRegistry: WorkspaceRegistryLike }
+  const services = ctx as Context & { sessionPersistence: SessionPersistenceLike }
   const domainPromise = ctx.storageDomain.open(workbookDomainSpec)
   const workbookUpdateLocks = new Map<string, Promise<void>>()
   const sessionQueueLocks = new Map<string, Promise<void>>()
@@ -1229,10 +1229,10 @@ export function apply(ctx: Context): void {
           return { ok: false, error: { code: 'invalid-arguments', message: 'filePath is required for export', details: {} } } as any
         }
         assertActiveSheetFile(table.get(storageKey))
-        const root = services.workspaceRegistry.host.sessionPath(sessionId)
-        if (typeof root !== 'string' || root.length === 0) throw new Error('无法解析当前 session workspace 目录')
         let saved: Awaited<ReturnType<typeof saveExportedFile>>
         try {
+          const root = (await services.sessionPersistence.stat(sessionId))?.header.cwd
+          if (typeof root !== 'string' || !isAbsolute(root)) throw new Error('无法解析当前 session workspace 目录')
           saved = await saveExportedFile(root, request.filePath, unitType, request.snapshot, request.overwrite === true)
         } catch (error) {
           return {
